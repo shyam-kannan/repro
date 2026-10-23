@@ -13,6 +13,15 @@ export type LabeledField = {
   path: string;
 };
 
+// A clickable element as the accessibility tree exposes it. `nth` tells apart
+// elements that share a role and name, in document order.
+export type ClickableElement = {
+  role: string;
+  name: string;
+  nth: number;
+  disabled: boolean;
+};
+
 export type Observation = {
   step: string;
   capturedAt: string;
@@ -21,14 +30,18 @@ export type Observation = {
   screenshot: string;
   ariaSnapshot: string;
   fields: LabeledField[];
+  elements: ClickableElement[];
 };
 
 type AriaNode = {
   role?: string;
   name?: string;
   text?: string;
+  disabled?: boolean;
   children?: AriaNode[];
 };
+
+const CLICKABLE_ROLES = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem']);
 
 const LABELED_TEXT = /^([^:\n]{1,40}):\s+(\S.*)$/;
 
@@ -42,6 +55,20 @@ export function extractLabeledFields(nodes: AriaNode[], parentPath: string[] = [
     if (node.children) fields.push(...extractLabeledFields(node.children, path));
   }
   return fields;
+}
+
+export function extractClickableElements(nodes: AriaNode[]): ClickableElement[] {
+  const elements: ClickableElement[] = [];
+  const visit = (node: AriaNode) => {
+    if (node.role && CLICKABLE_ROLES.has(node.role)) {
+      const name = node.name ?? '';
+      const nth = elements.filter((e) => e.role === node.role && e.name === name).length;
+      elements.push({ role: node.role, name, nth, disabled: node.disabled === true });
+    }
+    node.children?.forEach(visit);
+  };
+  nodes.forEach(visit);
+  return elements;
 }
 
 export async function readLabeledFields(page: Page): Promise<LabeledField[]> {
@@ -113,7 +140,7 @@ export async function captureObservation(page: Page, step: string, outDir: strin
   const screenshot = join(outDir, `${step}.png`);
   await page.screenshot({ path: screenshot, fullPage: true, animations: 'disabled', caret: 'hide' });
   const ariaSnapshot = await page.ariaSnapshot();
-  const fields = await readLabeledFields(page);
+  const tree = (await page.ariaSnapshotJSON()) as AriaNode[];
   return {
     step,
     capturedAt: new Date().toISOString(),
@@ -121,6 +148,7 @@ export async function captureObservation(page: Page, step: string, outDir: strin
     title: await page.title(),
     screenshot,
     ariaSnapshot,
-    fields,
+    fields: extractLabeledFields(tree),
+    elements: extractClickableElements(tree),
   };
 }

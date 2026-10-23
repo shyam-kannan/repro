@@ -10,11 +10,17 @@
     "browsers": "playwright install chromium",
     "store": "node demo-store/start.ts",
     "smoke": "node scripts/smoke.ts",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "investigate": "node --env-file-if-exists=.env scripts/investigate.ts",
+    "trials": "node --env-file-if-exists=.env scripts/live-trials.ts",
+    "test": "node --test --test-concurrency=1 'test/**/*.test.ts'"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.2.0",
+    "playwright": "1.63.0"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
-    "playwright": "1.63.0",
     "typescript": "7.0.2"
   }
 }
