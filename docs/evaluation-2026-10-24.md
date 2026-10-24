@@ -73,3 +73,125 @@ it.
 - One model, one prompt version and one complaint phrasing for the cart
   cases.
 - The unavailable-store case never reaches the model.
+
+---
+
+# Follow-up: a bug that starts at quantity 3
+
+The question: what happens when the first click works and a later one
+breaks? None of the three correct-store runs above went past one click.
+
+## The `faulty-from-3` fixture
+
+The server prices quantity 3 or more as if it were 2, so the total reads
+$20 → $40 → $40 → $40. It uses the same page, JavaScript and controls as
+the other fixtures. Its mode exists only in server-side pricing
+(`demo-store/pricing.ts`), never in anything the browser receives.
+
+`npm run smoke` now clicks three times per fixture and checks the total after
+each click (69/69 checks). It confirms that all three fixtures serve
+byte-identical HTML and JS and look identical before the first click. It
+also confirms that **faulty-from-3 and correct are indistinguishable through
+quantity 2**: same values, and identical screenshot bytes after the first
+click. They differ only from quantity 3 ($40.00 vs $60.00).
+
+The harness store check now prices 2 and then 3 mugs through the store API.
+That separates all three fixtures: correct ($40, $60), faulty ($20, $20) and
+faulty-from-3 ($40, $40). Checking quantity 2 alone could not tell correct
+from faulty-from-3. The probe runs in the harness, outside the investigator's
+fresh browser session. The store is stateless, so the probe cannot change
+what the investigator sees.
+
+## Live runs
+
+`REPRO_MAX_OUTPUT_TOKENS=2048 npm run eval -- faulty-from-3`, once. Model,
+prompts and limits were unchanged (no change under `src/`), with the original
+cart complaint. The investigator was not told where the bug starts or how
+many clicks to make. Artifacts are in
+`runs/eval-faulty-from-3-2026-10-24T07-02-58-294Z/`, which Git ignores.
+
+| Case | Store (confirmed) | Explored | Totals seen | Expected | Actual | Duration | Tokens in / out | Evidence checks |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| faulty-from-3-1 | faulty-from-3 | 2 clicks, qty 1→2→3 | $20 → $40 → **$40** | Reproduced | Reproduced | 7.3 s | 7,932 / 981 | passed, 6/6 |
+| correct-control | correct | 2 clicks, qty 1→2→3 | $20 → $40 → $60 | Not reproduced in this run | Not reproduced in this run | 6.5 s | 7,994 / 796 | passed, 6/6 |
+| faulty-from-3-2 | faulty-from-3 | 2 clicks, qty 1→2→3 | $20 → $40 → **$40** | Reproduced | Reproduced | 7.1 s | 7,985 / 1,006 | passed, 6/6 |
+| faulty-from-3-3 | faulty-from-3 | 2 clicks, qty 1→2→3 | $20 → $40 → **$40** | Reproduced | Reproduced | 6.0 s | 7,984 / 829 | passed, 5/5 |
+
+**4/4 matched.** Each faulty-from-3 report says the first increase worked and
+the second left the total at $40.00 instead of $60.00. Each cites the qty-3
+observation, and the `obs-3` screenshots show it. Run 1 also noted that "the
+exact trigger ... is not established by two clicks". There were no retries,
+tool errors or blocked requests.
+
+No run stopped after one click, so none of these four shows the limitation
+directly. That was partly luck, as the next section shows.
+
+## How far the investigator explores
+
+After its first click, every run wrote a short note such as "I'll click once
+more to check that the behavior is consistent". It then stopped after the
+second click, whatever it saw. Depth is a judgment call, not a search.
+
+Through quantity 2 the correct and faulty-from-3 stores look the same to the
+model, so its decision to stop or continue after the first click cannot
+depend on the fixture. Every live cart-complaint run that saw "Quantity 2,
+Total $40.00" after its first click is therefore evidence about that
+decision:
+
+| Source | Runs | Stopped at qty 2 | Continued to qty 3 | Went past qty 3 |
+| --- | --- | --- | --- | --- |
+| `npm run trials` (correct) | 1 | 0 | 1 | 0 |
+| UI live run (correct) | 1 | 1 | 0 | 0 |
+| First evaluation (correct ×3) | 3 | 3 | 0 | 0 |
+| This follow-up (faulty-from-3 ×3, correct ×1) | 4 | 0 | 4 | 0 |
+| **Total** | **9** | **4** | **5** | **0** |
+
+So in **4 of 9** comparable runs, the investigator would have stopped at
+quantity 2. On the faulty-from-3 store, that means reporting "Not reproduced
+in this run" and missing the bug. No run reached quantity 4, so a bug starting
+there would have been missed in all nine. Nine runs is a small sample, and
+the split is uneven over time (3 of 3 stopped early in one batch, 0 of 4 in
+the next).
+
+## A missed bug versus a claim that contradicts its evidence
+
+The harness now records how far each run went and which observations show
+`Total ≠ Unit price × Quantity`. For a Not reproduced result on a buggy store,
+it classifies the mismatch as one of two kinds:
+
+- **Bug not discovered:** every recorded total is correct, and the run
+  stopped before the bug. The claim "Not reproduced in this run" is literally
+  true of what it saw. The failure is in exploration, and Repro's checks
+  cannot catch it, because the evidence is real and consistent.
+- **Claim contradicts its own evidence:** a recorded observation shows the
+  wrong total, yet the run reported Not reproduced.
+
+Neither happened in these four live runs. The offline test
+(`test/eval.test.ts`, with labeled test doubles) produces both:
+
+- The one-click double on faulty-from-3 is classified "Bug not discovered:
+  the run stopped after 1 click(s) at quantity 2".
+- A double that clicks twice, cites obs-3 (quantity 3, total $40.00) and
+  still claims Not reproduced is flagged as a contradiction.
+
+**That test also shows an implementation gap: Repro's code keeps that
+contradicting verdict.** The evidence rules only confirm that each citation
+matches the page and that some value changed. They never compare the values
+with the claim. The harness flags it, but the investigator does not.
+
+## Harness error during this evaluation (fixed, no runs repeated)
+
+The first summary of these runs reported "harness error: investigation
+threw: Cannot access 'cents' before initialization" for all four. That was a
+bug in `scripts/eval.ts`: the command-line block ran before a helper defined
+further down the file was initialized. The offline test imported the module,
+so it never hit that path. All four investigations had already finished and
+saved their records. Only the harness's analysis afterwards failed.
+
+The fix moves the entry point to the end of the module and narrows the error
+handling, so an analysis failure can no longer be reported as a failed
+investigation. A subprocess test now covers the command-line path. The
+summary was rebuilt from the saved records with
+`npm run eval -- --summarize <dir>`, which makes no model requests. The
+`run.json` hashes were unchanged, and the broken summary is kept as
+`harness-error-summary.*` in the same directory.

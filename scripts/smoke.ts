@@ -1,5 +1,6 @@
-// Spike A browser smoke test. Runs the same cart flow against both store
-// fixtures and checks the labeled observations. Exits nonzero on any failure.
+// Browser smoke test. Runs the same cart flow (three increases, quantity 1 to
+// 4) against every store fixture and checks the labeled observations after
+// each click. Exits nonzero on any failure.
 //
 // The expected totals below belong to this harness. They never appear in the
 // observations, which hold only what the browser showed.
@@ -26,9 +27,11 @@ const ACTION_TIMEOUT_MS = 5_000;
 const RUN_TIMEOUT_MS = 60_000;
 const LEAK_PATTERN = /\b(correct|faulty|fixture|bug|expected|verdict)\b/i;
 
-const SCENARIOS: { fixture: Fixture; expectedTotalAfter: string }[] = [
-  { fixture: 'correct', expectedTotalAfter: '$40.00' },
-  { fixture: 'faulty', expectedTotalAfter: '$20.00' },
+// Expected Total after each click (quantity 2, 3, 4).
+const SCENARIOS: { fixture: Fixture; expectedTotals: string[] }[] = [
+  { fixture: 'correct', expectedTotals: ['$40.00', '$60.00', '$80.00'] },
+  { fixture: 'faulty', expectedTotals: ['$20.00', '$20.00', '$20.00'] },
+  { fixture: 'faulty-from-3', expectedTotals: ['$40.00', '$40.00', '$40.00'] },
 ];
 
 type Check = { name: string; pass: boolean; detail: string };
@@ -45,7 +48,7 @@ const rel = (path: string) => relative(repoRoot, path);
 
 async function runScenario(
   fixture: Fixture,
-  expectedTotalAfter: string,
+  expectedTotals: string[],
   outDir: string,
 ): Promise<ScenarioResult> {
   const checks: Check[] = [];
@@ -96,37 +99,51 @@ async function runScenario(
     check('before: Total is $20.00', totalBefore.ok && totalBefore.value === '$20.00', describe(totalBefore));
     if (!quantityBefore.ok) return result;
 
-    try {
-      await page.getByRole('button', { name: INCREASE_BUTTON, exact: true }).click();
-      check(`click "${INCREASE_BUTTON}"`, true, 'click completed');
-    } catch (error) {
-      check(`click "${INCREASE_BUTTON}"`, false, (error as Error).message.split('\n')[0]);
-      return result;
+    let previous = before;
+    for (const [index, expectedTotal] of expectedTotals.entries()) {
+      const click = index + 1;
+      const expectedQuantity = String(click + 1);
+      const quantityPrevious = fieldValue(previous.fields, 'Quantity');
+      if (!quantityPrevious.ok) return result;
+      try {
+        await page.getByRole('button', { name: INCREASE_BUTTON, exact: true }).click();
+        check(`click ${click} "${INCREASE_BUTTON}"`, true, 'click completed');
+      } catch (error) {
+        check(`click ${click} "${INCREASE_BUTTON}"`, false, (error as Error).message.split('\n')[0]);
+        return result;
+      }
+
+      // Wait for the quantity, never the total: a total that stays wrong must be
+      // observed as wrong, not turned into a timeout.
+      const quantityChange = await waitForFieldChange(page, 'Quantity', quantityPrevious.value, {
+        timeoutMs: ACTION_TIMEOUT_MS,
+      });
+      if (!check(`click ${click} changed Quantity`, quantityChange.ok, describe(quantityChange))) return result;
+      await waitForSettled(page, network);
+
+      const after = await captureObservation(page, `after-increase-${click}`, outDir);
+      result.observations.push(after);
+      previous = after;
+
+      const unitAfter = fieldValue(after.fields, 'Unit price');
+      const quantityAfter = fieldValue(after.fields, 'Quantity');
+      const totalAfter = fieldValue(after.fields, 'Total');
+      check(`after click ${click}: Unit price is $20.00`, unitAfter.ok && unitAfter.value === '$20.00', describe(unitAfter));
+      if (
+        !check(
+          `after click ${click}: Quantity is ${expectedQuantity}`,
+          quantityAfter.ok && quantityAfter.value === expectedQuantity,
+          describe(quantityAfter),
+        )
+      ) {
+        return result;
+      }
+      check(
+        `after click ${click}: Total is ${expectedTotal}`,
+        totalAfter.ok && totalAfter.value === expectedTotal,
+        describe(totalAfter),
+      );
     }
-
-    // Wait for the quantity, never the total: a total that stays wrong must be
-    // observed as wrong, not turned into a timeout.
-    const quantityChange = await waitForFieldChange(page, 'Quantity', quantityBefore.value, {
-      timeoutMs: ACTION_TIMEOUT_MS,
-    });
-    if (!check('click changed Quantity', quantityChange.ok, describe(quantityChange))) return result;
-    await waitForSettled(page, network);
-
-    const after = await captureObservation(page, 'after-increase', outDir);
-    result.observations.push(after);
-
-    const unitAfter = fieldValue(after.fields, 'Unit price');
-    const quantityAfter = fieldValue(after.fields, 'Quantity');
-    const totalAfter = fieldValue(after.fields, 'Total');
-    check('after: Unit price is $20.00', unitAfter.ok && unitAfter.value === '$20.00', describe(unitAfter));
-    if (!check('after: Quantity is 2', quantityAfter.ok && quantityAfter.value === '2', describe(quantityAfter))) {
-      return result;
-    }
-    check(
-      `after: Total is ${expectedTotalAfter}`,
-      totalAfter.ok && totalAfter.value === expectedTotalAfter,
-      describe(totalAfter),
-    );
 
     for (const observation of result.observations) {
       const { size } = await stat(observation.screenshot);
@@ -146,23 +163,29 @@ function describe(result: { ok: true; value: string } | { ok: false; reason: str
   return result.ok ? `observed "${result.value}"` : result.reason;
 }
 
+// Every fixture is compared with the first one.
 function crossScenarioChecks(results: ScenarioResult[]): Check[] {
   const checks: Check[] = [];
-  const [a, b] = results;
+  const [a, ...others] = results;
   const sameAssets =
     Object.keys(a.assetHashes).length > 0 &&
-    Object.keys(a.assetHashes).every((path) => a.assetHashes[path] === b.assetHashes[path]);
+    others.every((b) => Object.keys(a.assetHashes).every((path) => a.assetHashes[path] === b.assetHashes[path]));
   checks.push({ name: 'fixtures serve identical HTML and JS', pass: sameAssets, detail: JSON.stringify(a.assetHashes) });
 
   const beforeA = a.observations.find((o) => o.step === 'before');
-  const beforeB = b.observations.find((o) => o.step === 'before');
   const sameBefore =
-    !!beforeA && !!beforeB &&
-    beforeA.ariaSnapshot === beforeB.ariaSnapshot &&
-    beforeA.title === beforeB.title &&
-    new URL(beforeA.url).pathname === new URL(beforeB.url).pathname;
+    !!beforeA &&
+    others.every((b) => {
+      const beforeB = b.observations.find((o) => o.step === 'before');
+      return (
+        !!beforeB &&
+        beforeA.ariaSnapshot === beforeB.ariaSnapshot &&
+        beforeA.title === beforeB.title &&
+        new URL(beforeA.url).pathname === new URL(beforeB.url).pathname
+      );
+    });
   checks.push({
-    name: 'fixtures look identical before the click',
+    name: 'fixtures look identical before the first click',
     pass: sameBefore,
     detail: 'same entry route, title and accessibility snapshot',
   });
@@ -186,8 +209,8 @@ async function main(): Promise<boolean> {
   console.log(`Run directory: ${rel(runDir)}\n`);
 
   const results: ScenarioResult[] = [];
-  for (const { fixture, expectedTotalAfter } of SCENARIOS) {
-    results.push(await runScenario(fixture, expectedTotalAfter, join(runDir, fixture)));
+  for (const { fixture, expectedTotals } of SCENARIOS) {
+    results.push(await runScenario(fixture, expectedTotals, join(runDir, fixture)));
   }
   const shared = crossScenarioChecks(results);
 
@@ -204,7 +227,7 @@ async function main(): Promise<boolean> {
       JSON.stringify(result.observations.map((o) => ({ ...o, screenshot: rel(o.screenshot) })), null, 2),
     );
   }
-  console.log('== both fixtures ==');
+  console.log('== all fixtures ==');
   printChecks(shared);
 
   const allChecks = [...results.flatMap((r) => r.checks), ...shared];

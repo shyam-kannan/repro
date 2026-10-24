@@ -1,12 +1,13 @@
-// Small live evaluation: eight investigations with the configured model,
-// prompts and limits, each run exactly once and kept as-is.
-//   npm run eval
-// The expected verdicts and store setups live only in CASES below. The
+// Small live evaluations with the configured model, prompts and limits; each
+// run happens exactly once and is kept as-is.
+//   npm run eval                    the original eight cases (CASES)
+//   npm run eval -- faulty-from-3   three runs on the faulty-from-3 store plus one correct-store control
+// The expected verdicts and store setups live only in this file. The
 // investigator receives the complaint and a store URL, nothing else.
 // Output (git-ignored): runs/eval-<timestamp>/ with one directory per run,
 // summary.json, summary.md, contact-sheet.html and contact-sheet.png.
 import { appendFile, readFile, stat, writeFile, mkdir } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { chromium } from 'playwright';
 import type { Fixture } from '../demo-store/pricing.ts';
 import { loadConfig, type InvestigatorSettings } from '../src/config.ts';
@@ -32,6 +33,16 @@ export const CASES: Case[] = [
   // The store has no search feature; the correct fixture is used so nothing else is broken.
   { id: 'unrelated-complaint', store: 'correct', complaint: SEARCH_COMPLAINT, expected: 'inconclusive' },
 ];
+
+// The bug only appears from quantity 3, after one click that works correctly.
+export const FAULTY_FROM_3_CASES: Case[] = [
+  { id: 'faulty-from-3-1', store: 'faulty-from-3', complaint: CART_COMPLAINT, expected: 'reproduced' },
+  { id: 'correct-control', store: 'correct', complaint: CART_COMPLAINT, expected: 'not_reproduced' },
+  { id: 'faulty-from-3-2', store: 'faulty-from-3', complaint: CART_COMPLAINT, expected: 'reproduced' },
+  { id: 'faulty-from-3-3', store: 'faulty-from-3', complaint: CART_COMPLAINT, expected: 'reproduced' },
+];
+
+export const SUITES: Record<string, Case[]> = { original: CASES, 'faulty-from-3': FAULTY_FROM_3_CASES };
 
 const VERDICT_LABEL = { reproduced: 'Reproduced', not_reproduced: 'Not reproduced in this run', inconclusive: 'Inconclusive' };
 
@@ -68,7 +79,19 @@ export type CaseResult = {
   toolErrors: number;
   blockedRequests: number;
   screenshots: ScreenshotCheck | null;
+  exploration: Exploration | null;
+  // For a mismatch: why the verdict differs, judged against the run's own recording.
+  mismatchAnalysis: string | null;
   harnessError?: string;
+};
+
+// How far a run went, from its recorded actions and observations.
+type Exploration = {
+  clicks: number;
+  quantities: string[];
+  maxQuantity: number | null;
+  // Observations whose Total differs from Unit price × Quantity.
+  wrongTotals: { observation: string; quantity: string; total: string; expectedTotal: string }[];
 };
 
 const repoRoot = new URL('..', import.meta.url).pathname;
@@ -78,6 +101,7 @@ export type EvaluationDeps = {
   settings: InvestigatorSettings;
   evalDir: string;
   cases?: Case[];
+  suite?: string;
   log?: (line: string) => void;
 };
 
@@ -105,9 +129,21 @@ export async function runEvaluation(deps: EvaluationDeps) {
     );
   }
 
+  return writeSummary(results, evalDir, { suite: deps.suite ?? 'original', provider: provider.name, settings }, log);
+}
+
+async function writeSummary(
+  results: CaseResult[],
+  evalDir: string,
+  meta: { suite: string; provider: string; settings: InvestigatorSettings; note?: string },
+  log: (line: string) => void,
+) {
+  const { settings } = meta;
   const summary = {
     createdAt: new Date().toISOString(),
-    provider: provider.name,
+    suite: meta.suite,
+    ...(meta.note ? { note: meta.note } : {}),
+    provider: meta.provider,
     model: settings.model,
     settings,
     matched: results.filter((r) => r.match).length,
@@ -118,7 +154,8 @@ export async function runEvaluation(deps: EvaluationDeps) {
   const table = markdownTable(results);
   await writeFile(
     join(evalDir, 'summary.md'),
-    `# Evaluation ${relative(repoRoot, evalDir)}\n\nProvider ${provider.name}, model \`${settings.model}\`, ` +
+    `# Evaluation ${relative(repoRoot, evalDir)} (suite: ${meta.suite})\n\n${meta.note ? `${meta.note}\n\n` : ''}` +
+      `Provider ${meta.provider}, model \`${settings.model}\`, ` +
       `max output tokens ${settings.maxOutputTokens}, ${settings.maxBrowserToolCalls} browser tool calls, ` +
       `${settings.deadlineMs / 1000} s deadline.\n\n${summary.matched}/${summary.total} verdicts matched the expected verdict.\n\n${table}\n`,
   );
@@ -128,18 +165,39 @@ export async function runEvaluation(deps: EvaluationDeps) {
   return summary;
 }
 
-if (import.meta.main) {
-  const loaded = loadConfig();
-  if (!loaded.ok) {
-    console.error(`Evaluation blocked: ${loaded.problems.join('; ')}. See .env.example.`);
-    process.exit(2);
+// Rebuilds the summary of an earlier evaluation from its results.jsonl (case,
+// run ID and store check, written before analysis) and the saved run records.
+// Runs no investigations and makes no model requests.
+export async function summarizeExisting(evalDir: string, log: (line: string) => void = (line) => console.log(line)) {
+  const lines = (await readFile(join(evalDir, 'results.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as CaseResult);
+  const allCases = Object.values(SUITES).flat();
+  const suite = Object.entries(SUITES).find(([, cases]) => lines.every((l) => cases.some((c) => c.id === l.caseId)))?.[0] ?? 'unknown';
+  const results: CaseResult[] = [];
+  let settings: InvestigatorSettings | null = null;
+  let provider = 'unknown';
+  for (const line of lines) {
+    const testCase = allCases.find((c) => c.id === line.caseId);
+    const record = await readFile(join(evalDir, line.runId, 'run.json'), 'utf8').then(
+      (text) => JSON.parse(text) as RunRecord,
+      () => null,
+    );
+    if (!testCase || !record) {
+      results.push(line);
+      continue;
+    }
+    // Saved records hold the absolute run directory of the machine that wrote them.
+    record.runDir = join(evalDir, line.runId);
+    settings ??= record.settings;
+    provider = record.provider;
+    results.push(await resultFromRecord(line, line.storeCheck, record, testCase.expected));
   }
-  const summary = await runEvaluation({
-    provider: createAnthropicProvider(loaded.config.apiKey),
-    settings: loaded.config.settings,
-    evalDir: join(repoRoot, 'runs', `eval-${timestamp()}`),
-  });
-  process.exitCode = summary.matched === summary.total ? 0 : 1;
+  if (!settings) throw new Error(`No saved run records in ${evalDir}`);
+  return writeSummary(
+    results,
+    evalDir,
+    { suite, provider, settings, note: 'Rebuilt from saved run records with `--summarize`; no investigations were run for this summary.' },
+    log,
+  );
 }
 
 async function runCase(testCase: Case, runId: string, { provider, settings, evalDir }: EvaluationDeps): Promise<CaseResult> {
@@ -169,15 +227,34 @@ async function runCase(testCase: Case, runId: string, { provider, settings, eval
     return emptyResult(base, `store check failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  let record: RunRecord;
   try {
     // investigate() launches a new browser process and context for every run.
-    const record = await investigate({ complaint: testCase.complaint, storeUrl: store.url }, { provider, settings, runsDir: evalDir, runId });
-    return {
-      ...base,
+    record = await investigate({ complaint: testCase.complaint, storeUrl: store.url }, { provider, settings, runsDir: evalDir, runId });
+  } catch (error) {
+    return emptyResult({ ...base }, `investigation threw: ${error instanceof Error ? error.message : String(error)}`, storeCheck);
+  } finally {
+    store.close();
+  }
+  return resultFromRecord(base, storeCheck, record, testCase.expected);
+}
+
+async function resultFromRecord(
+  base: Pick<CaseResult, 'caseId' | 'store' | 'complaint' | 'expected' | 'runId'>,
+  storeCheck: string,
+  record: RunRecord,
+  expected: RunRecord['verdictCode'],
+): Promise<CaseResult> {
+  return {
+      caseId: base.caseId,
+      store: base.store,
+      complaint: base.complaint,
+      expected: base.expected,
+      runId: base.runId,
       storeCheck,
       runDir: relative(repoRoot, record.runDir),
       actual: record.verdict,
-      match: record.verdictCode === testCase.expected,
+      match: record.verdictCode === expected,
       endReason: record.endReason,
       verdictReasons: record.verdictReasons,
       modelProposed: record.modelReport?.verdict ?? null,
@@ -194,12 +271,9 @@ async function runCase(testCase: Case, runId: string, { provider, settings, eval
       toolErrors: record.toolErrors.length,
       blockedRequests: record.blockedRequests.length,
       screenshots: await checkScreenshots(record),
-    };
-  } catch (error) {
-    return emptyResult({ ...base }, `investigation threw: ${error instanceof Error ? error.message : String(error)}`, storeCheck);
-  } finally {
-    store.close();
-  }
+      exploration: explore(record),
+      mismatchAnalysis: record.verdictCode === expected ? null : analyseMismatch(record, expected),
+  };
 }
 
 function emptyResult(base: Pick<CaseResult, 'caseId' | 'store' | 'complaint' | 'expected' | 'runId'>, harnessError: string, storeCheck = 'failed'): CaseResult {
@@ -223,8 +297,56 @@ function emptyResult(base: Pick<CaseResult, 'caseId' | 'store' | 'complaint' | '
     toolErrors: 0,
     blockedRequests: 0,
     screenshots: null,
+    exploration: null,
+    mismatchAnalysis: null,
     harnessError,
   };
+}
+
+const cents = (money: string | undefined) => {
+  const match = /^\$(\d+)\.(\d{2})$/.exec(money ?? '');
+  return match ? Number(match[1]) * 100 + Number(match[2]) : null;
+};
+const dollars = (value: number) => `$${(value / 100).toFixed(2)}`;
+
+function explore(record: RunRecord): Exploration {
+  const field = (o: RunRecord['observations'][number], label: string) => o.fields.find((f) => f.label === label)?.value;
+  const quantities = record.observations.map((o) => field(o, 'Quantity') ?? '?');
+  const numeric = quantities.map(Number).filter(Number.isFinite);
+  const wrongTotals: Exploration['wrongTotals'] = [];
+  for (const o of record.observations) {
+    const unit = cents(field(o, 'Unit price'));
+    const quantity = Number(field(o, 'Quantity'));
+    const total = cents(field(o, 'Total'));
+    if (unit === null || total === null || !Number.isInteger(quantity)) continue;
+    if (total !== unit * quantity) {
+      wrongTotals.push({ observation: o.id, quantity: String(quantity), total: dollars(total), expectedTotal: dollars(unit * quantity) });
+    }
+  }
+  return {
+    clicks: record.actions.filter((a) => a.kind === 'click' && a.ok).length,
+    quantities,
+    maxQuantity: numeric.length ? Math.max(...numeric) : null,
+    wrongTotals,
+  };
+}
+
+// Separates "never reached the bug" from "saw the bug and reported otherwise".
+function analyseMismatch(record: RunRecord, expected: RunRecord['verdictCode']): string {
+  const { maxQuantity, wrongTotals, clicks } = explore(record);
+  if (expected === 'reproduced' && record.verdictCode === 'not_reproduced') {
+    if (wrongTotals.length === 0) {
+      return (
+        `Bug not discovered: the run stopped after ${clicks} click(s) at quantity ${maxQuantity}, and every recorded ` +
+        `total equals unit price × quantity. The claim matches what it observed; its exploration did not reach the bug.`
+      );
+    }
+    return (
+      `Claim contradicts its own evidence: ${wrongTotals.map((w) => `${w.observation} shows quantity ${w.quantity} with total ${w.total} (expected ${w.expectedTotal})`).join('; ')}, ` +
+      `yet the run reported Not reproduced.`
+    );
+  }
+  return `Expected ${expected}, got ${record.verdictCode} (end reason ${record.endReason}); see the run record.`;
 }
 
 // Every recorded observation must have a readable PNG, and every cited
@@ -251,8 +373,8 @@ async function checkScreenshots(record: RunRecord): Promise<ScreenshotCheck> {
 
 function markdownTable(rows: CaseResult[]): string {
   const lines = [
-    '| Case | Run | Expected | Actual | Match | End reason | Duration | Tokens in / out | Requests | Tool calls | Evidence checks | Screenshots |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| Case | Run | Expected | Actual | Match | End reason | Clicks | Quantities seen | Wrong totals recorded | Duration | Tokens in / out | Requests | Evidence checks | Screenshots |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
   ];
   for (const r of rows) {
     const evidence =
@@ -266,10 +388,16 @@ function markdownTable(rows: CaseResult[]): string {
       : 'n/a';
     lines.push(
       `| ${r.caseId} | ${r.runId} | ${r.expected} | ${r.actual ?? `harness error: ${r.harnessError}`} | ${r.match ? 'yes' : 'NO'} | ` +
-        `${r.endReason ?? '-'} | ${r.durationMs === null ? '-' : `${(r.durationMs / 1000).toFixed(1)} s`} | ` +
+        `${r.endReason ?? '-'} | ${r.exploration?.clicks ?? '-'} | ${r.exploration?.quantities.join(' → ') || '-'} | ` +
+        `${r.exploration ? (r.exploration.wrongTotals.map((w) => `${w.observation}: qty ${w.quantity}, ${w.total}`).join('; ') || 'none') : '-'} | ` +
+        `${r.durationMs === null ? '-' : `${(r.durationMs / 1000).toFixed(1)} s`} | ` +
         `${r.inputTokens.toLocaleString('en-US')} / ${r.outputTokens.toLocaleString('en-US')} | ` +
-        `${r.modelRequests}${r.failedModelRequests ? ` (${r.failedModelRequests} failed)` : ''} | ${r.browserToolCalls} | ${evidence} | ${shots} |`,
+        `${r.modelRequests}${r.failedModelRequests ? ` (${r.failedModelRequests} failed)` : ''} | ${evidence} | ${shots} |`,
     );
+  }
+  const analyses = rows.filter((r) => r.mismatchAnalysis);
+  if (analyses.length) {
+    lines.push('', '**Mismatches**', '', ...analyses.map((r) => `- ${r.caseId} (${r.runId}): ${r.mismatchAnalysis}`));
   }
   return lines.join('\n');
 }
@@ -313,4 +441,34 @@ async function writeContactSheet(rows: CaseResult[], evalDir: string) {
   } finally {
     await browser.close();
   }
+}
+
+// Command line entry point. Kept at the end of the module so every helper above
+// is initialized before it runs.
+if (import.meta.main && process.argv[2] === '--summarize') {
+  if (!process.argv[3]) {
+    console.error('Usage: npm run eval -- --summarize runs/eval-<...>');
+    process.exit(2);
+  }
+  await summarizeExisting(resolve(process.argv[3]));
+} else if (import.meta.main) {
+  const suiteName = process.argv[2] ?? 'original';
+  const cases = SUITES[suiteName];
+  if (!cases) {
+    console.error(`Unknown suite "${suiteName}". Available: ${Object.keys(SUITES).join(', ')}`);
+    process.exit(2);
+  }
+  const loaded = loadConfig();
+  if (!loaded.ok) {
+    console.error(`Evaluation blocked: ${loaded.problems.join('; ')}. See .env.example.`);
+    process.exit(2);
+  }
+  const summary = await runEvaluation({
+    provider: createAnthropicProvider(loaded.config.apiKey),
+    settings: loaded.config.settings,
+    evalDir: join(repoRoot, 'runs', `eval-${suiteName === 'original' ? '' : `${suiteName}-`}${timestamp()}`),
+    cases,
+    suite: suiteName,
+  });
+  process.exitCode = summary.matched === summary.total ? 0 : 1;
 }

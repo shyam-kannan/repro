@@ -1,6 +1,7 @@
 // Offline tests for the evaluation harness. The model is a scripted TEST
 // DOUBLE; these results check the harness, not the model.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -8,9 +9,21 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import type { ModelProvider } from '../src/provider.ts';
-import { CASES, runEvaluation } from '../scripts/eval.ts';
+import { CASES, FAULTY_FROM_3_CASES, runEvaluation } from '../scripts/eval.ts';
+import { FIXTURES } from '../demo-store/pricing.ts';
 import { identifyStore, startStore, unavailableStoreUrl } from '../scripts/harness.ts';
-import { cartInvestigatorDouble, tempRunsDir, TEST_DOUBLE_NAME, testSettings } from './helpers.ts';
+import {
+  cartInvestigatorDouble,
+  elementNamed,
+  latestObservation,
+  reply,
+  tempRunsDir,
+  TEST_DOUBLE_NAME,
+  testSettings,
+  toolUse,
+  valueOf,
+  type ModelObservation,
+} from './helpers.ts';
 
 // The cart double keeps per-run state, so start a fresh one for each run.
 function perRunCartDouble(): ModelProvider {
@@ -26,7 +39,7 @@ function perRunCartDouble(): ModelProvider {
 
 describe('store checks', () => {
   test('identifies each fixture from its pricing, and rejects other servers', async () => {
-    for (const fixture of ['correct', 'faulty'] as const) {
+    for (const fixture of FIXTURES) {
       const store = await startStore(fixture);
       try {
         assert.equal(await identifyStore(store.url), fixture);
@@ -88,5 +101,78 @@ describe('evaluation pipeline (test double)', () => {
     assert.match(markdown, /3\/4 verdicts matched/);
     assert.match(markdown, /\| unrelated-complaint \| run-[0-9a-f]{8} \| Inconclusive \| Not reproduced in this run \| NO \|/);
     assert.ok((await stat(join(evalDir, 'contact-sheet.png'))).size > 10_000);
+  });
+});
+
+describe('faulty-from-3 analysis (test double)', () => {
+  // Clicks twice, then claims Not reproduced while its own observations show the bug.
+  function contradictingDouble(): ModelProvider {
+    let seen: ModelObservation[] = [];
+    return {
+      name: TEST_DOUBLE_NAME,
+      async createMessage(request) {
+        if (request.messages.length === 1) seen = [];
+        const observation = latestObservation(request);
+        seen.push(observation);
+        if (seen.length <= 2) return reply([toolUse('click_element', { element_id: elementNamed(observation, 'Increase quantity') })]);
+        const cite = (o: ModelObservation, label: string) => ({ observation_id: o.observation_id, label, value: valueOf(o, label) });
+        return reply([
+          toolUse('finish_investigation', {
+            verdict: 'not_reproduced',
+            expected_behavior: 'The total increases when the quantity increases.',
+            assumptions: [],
+            observed_behavior: 'The total changed after increasing the quantity.',
+            evidence: [cite(seen[0], 'Quantity'), cite(seen[0], 'Total'), cite(seen[2], 'Quantity'), cite(seen[2], 'Total')],
+            explanation: 'Compared first and last observation.',
+          }),
+        ]);
+      },
+    };
+  }
+
+  test('a one-click run that misses the bug is "not discovered"; a claim against recorded evidence is flagged', async () => {
+    const cases = FAULTY_FROM_3_CASES.filter((c) => c.id === 'faulty-from-3-1' || c.id === 'correct-control');
+    const missed = await runEvaluation({
+      provider: perRunCartDouble(),
+      settings: testSettings(),
+      evalDir: join(await tempRunsDir(), 'eval'),
+      cases,
+      log: () => {},
+    });
+    const [oneClick, control] = missed.results;
+    assert.match(oneClick.storeCheck, /^faulty-from-3 store confirmed/);
+    assert.equal(oneClick.actual, 'Not reproduced in this run');
+    assert.equal(oneClick.match, false);
+    assert.deepEqual(oneClick.exploration?.quantities, ['1', '2']);
+    assert.deepEqual(oneClick.exploration?.wrongTotals, []);
+    assert.match(oneClick.mismatchAnalysis ?? '', /^Bug not discovered: the run stopped after 1 click\(s\) at quantity 2/);
+    assert.equal(control.match, true);
+    assert.equal(control.mismatchAnalysis, null);
+
+    const contradicted = await runEvaluation({
+      provider: contradictingDouble(),
+      settings: testSettings(),
+      evalDir: join(await tempRunsDir(), 'eval'),
+      cases: cases.slice(0, 1),
+      log: () => {},
+    });
+    const [run] = contradicted.results;
+    assert.equal(run.actual, 'Not reproduced in this run', 'citations are valid, so code keeps the verdict');
+    assert.deepEqual(run.exploration?.quantities, ['1', '2', '3']);
+    assert.deepEqual(run.exploration?.wrongTotals, [{ observation: 'obs-3', quantity: '3', total: '$40.00', expectedTotal: '$60.00' }]);
+    assert.match(run.mismatchAnalysis ?? '', /^Claim contradicts its own evidence: obs-3 shows quantity 3 with total \$40\.00 \(expected \$60\.00\)/);
+
+    // The command line path, run as a real process: rebuilds the summary from the
+    // saved records without investigating (this path once failed on init order).
+    const evalDir = join(run.runDir!, '..');
+    // No REPRO_* variables: summarizing needs no credentials.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('REPRO_')));
+    const cli = spawnSync(process.execPath, ['scripts/eval.ts', '--summarize', evalDir], { encoding: 'utf8', env });
+    assert.equal(cli.status, 0, cli.stderr);
+    const rebuilt = JSON.parse(await readFile(join(evalDir, 'summary.json'), 'utf8'));
+    assert.match(rebuilt.note, /no investigations were run/);
+    assert.equal(rebuilt.suite, 'faulty-from-3');
+    assert.equal(rebuilt.results[0].mismatchAnalysis, run.mismatchAnalysis);
+    assert.deepEqual(rebuilt.results[0].exploration, run.exploration);
   });
 });

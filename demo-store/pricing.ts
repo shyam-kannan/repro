@@ -1,7 +1,11 @@
 // Server-side cart pricing. The fixture is chosen when the server starts and
-// never reaches the page: both fixtures serve identical HTML and JavaScript.
+// never reaches the page: all fixtures serve identical HTML and JavaScript.
 
-export const FIXTURES = ['correct', 'faulty'] as const;
+// correct:       total = unit price × quantity.
+// faulty:        total ignores quantity (stays at one unit).
+// faulty-from-3: correct up to quantity 2, then the line total stops growing
+//                (quantity 3 or more is priced as 2).
+export const FIXTURES = ['correct', 'faulty', 'faulty-from-3'] as const;
 export type Fixture = (typeof FIXTURES)[number];
 
 export function isFixture(value: unknown): value is Fixture {
@@ -34,12 +38,10 @@ export function priceCart(input: unknown, fixture: Fixture): PricedCart {
     return { ...item, quantity };
   });
 
-  const totalCents = lines.reduce(
-    (sum, line) =>
-      fixture === 'faulty'
-        ? sum + line.unitPriceCents // Deliberate bug: quantity is ignored.
-        : sum + line.unitPriceCents * line.quantity,
-    0,
-  );
+  const totalCents = lines.reduce((sum, line) => {
+    if (fixture === 'faulty') return sum + line.unitPriceCents; // Deliberate bug: quantity is ignored.
+    if (fixture === 'faulty-from-3') return sum + line.unitPriceCents * Math.min(line.quantity, 2); // Deliberate bug from quantity 3.
+    return sum + line.unitPriceCents * line.quantity;
+  }, 0);
   return { lines, totalCents };
 }

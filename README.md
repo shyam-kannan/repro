@@ -19,8 +19,20 @@ with `claude-haiku-5-5`, all against one controlled store with one bug:
   model call), and Inconclusive for an unrelated search complaint. Every
   citation matched its observation and screenshot.
 
-That is a small sample of one obvious bug with one complaint phrasing, and it
-cannot rule out a meaningful error rate. Harder bugs and more runs are needed
+- The `faulty-from-3` follow-up (`npm run eval -- faulty-from-3`): **4/4
+  matched**. Three runs on a store whose total breaks only from quantity 3
+  were all Reproduced, and the correct-store control was Not reproduced.
+
+**Known limitation: exploration depth.** The investigator decides for itself
+when to stop clicking. In 4 of the 9 live runs that saw a correct total after
+the first click, it stopped there, which would miss a bug starting at
+quantity 3. No run went past quantity 3. Also, Repro's code does not check
+that a verdict agrees with the cited values. An offline test shows it keeps a
+"Not reproduced" claim whose own evidence shows a wrong total. Details are in
+the evaluation notes.
+
+That is a small sample of simple bugs with one complaint phrasing, and it
+cannot rule out a meaningful error rate. More runs and harder bugs are needed
 before any reliability claim.
 
 ## Setup on a fresh checkout
@@ -75,14 +87,18 @@ Open the Repro URL, pick the example complaint (or type one), and click
 | `npm start` | Demo store plus the Repro web UI (see Quick start). Needs `.env` to investigate. |
 | `npm test` | Offline tests: investigator, server API and the browser flow through the UI. All model responses come from a scripted test double; no API calls. |
 | `npm run eval` | The 8-case live evaluation (see below). Needs `.env`. Exits nonzero on any mismatch. |
+| `npm run eval -- faulty-from-3` | Three live runs on the faulty-from-3 store plus one correct-store control. |
+| `npm run eval -- --summarize runs/eval-<...>` | Rebuilds an evaluation summary from saved run records. No model calls, no credentials needed. |
 | `npm run trials` | The two initial live trials (same complaint, each store fixture). Needs `.env`. |
 | `npm run investigate -- --url <store URL> [--expected "..."] "<complaint>"` | One live investigation. Needs `.env`. |
-| `npm run smoke` | Runs the cart flow against both store fixtures and checks the labeled observations. Exits nonzero if any check fails. |
+| `npm run smoke` | Runs the cart flow (three increases) against every store fixture and checks the labeled observations. Exits nonzero if any check fails. |
 | `npm run typecheck` | Type-checks all TypeScript. |
 | `REPRO_STORE_FIXTURE=correct npm run store` | Serves the demo store at http://127.0.0.1:4173/ (`PORT` to change). Use `faulty` for the buggy version. |
 
-Each smoke run writes to `runs/smoke-<timestamp>/` (git-ignored):
-`<fixture>/before.png`, `<fixture>/after-increase.png`,
+`npm run smoke` clicks "Increase quantity" three times per fixture and checks
+the total after each click. Each smoke run writes to
+`runs/smoke-<timestamp>/` (git-ignored): `<fixture>/before.png`,
+`<fixture>/after-increase-1.png` … `-3.png`,
 `<fixture>/observations.json` and `summary.json`.
 
 ## Demo store
@@ -91,12 +107,15 @@ One cart: Ceramic Mug, unit price $20.00, quantity 1, total $20.00, and an
 "Increase quantity" button. No tax, discounts or shipping.
 
 The fixture is chosen by server configuration (`REPRO_STORE_FIXTURE`, or the
-argument to `createStoreServer`). Both fixtures serve byte-identical HTML and
+argument to `createStoreServer`). All fixtures serve byte-identical HTML and
 JavaScript at the same route, and the pricing API response carries no fixture
 marker. They differ only in how the server computes the total:
 
 - `correct`: total = unit price × quantity → $40.00 after one click.
 - `faulty`: total ignores quantity → stays $20.00 after one click.
+- `faulty-from-3`: correct up to quantity 2 ($40.00), then the total stops
+  growing → $40.00 at quantity 3 and above. Indistinguishable from `correct`
+  until the second click.
 
 ## How observations work
 
@@ -294,9 +313,11 @@ investigator receives the complaint and a URL, and the run IDs are opaque.
 
 Before each run, `scripts/harness.ts` (shared with `npm run trials`) starts a
 fresh store on an OS-assigned port, so ports cannot collide. It then confirms
-which fixture is answering by pricing two mugs through the store API: $40.00
-means correct, $20.00 means faulty. For the unavailable case it confirms the
-connection is refused. Every investigation launches its own Chromium process
+which fixture is answering by pricing 2 and then 3 mugs through the store API,
+outside the investigator's browser: ($40, $60) means correct, ($20, $20)
+faulty and ($40, $40) faulty-from-3. Quantity 2 alone cannot separate correct
+from faulty-from-3. For the unavailable case it confirms the connection is
+refused. Every investigation launches its own Chromium process
 and context. Failures are recorded, never retried.
 
 Output goes to `runs/eval-<timestamp>/` (git-ignored):
@@ -304,8 +325,11 @@ Output goes to `runs/eval-<timestamp>/` (git-ignored):
 - one directory per run, in the usual run format
 - `results.jsonl`, written as each run finishes
 - `summary.json` and `summary.md`: expected and actual verdict, end reason,
-  duration, tokens, model requests, tool calls, whether the evidence checks
-  passed, and the screenshot check
+  clicks, quantities seen, any recorded wrong totals (Total ≠ Unit price ×
+  Quantity), duration, tokens, model requests, whether the evidence checks
+  passed, and the screenshot check. Each mismatch is classified as "bug not
+  discovered" (the run stopped before the bug and every recorded total is
+  correct) or "claim contradicts its own evidence".
 - `contact-sheet.html` and `contact-sheet.png`: every cited observation's
   screenshot beside its recorded and cited values, for checking by eye
 
