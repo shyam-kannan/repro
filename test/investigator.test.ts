@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import Anthropic from '@anthropic-ai/sdk';
-import { investigate, type InvestigatorDeps, type RunRecord } from '../src/investigator.ts';
+import { investigate, type InvestigationEvent, type InvestigatorDeps, type RunRecord } from '../src/investigator.ts';
 import type { InvestigatorSettings } from '../src/config.ts';
 import {
   cartInvestigatorDouble,
@@ -419,5 +419,41 @@ describe('browser cleanup and isolation', () => {
       offsite.close();
       page.close();
     }
+  });
+});
+
+describe('progress events', () => {
+  test('events mirror the recorded run, and a throwing listener cannot change it', async () => {
+    const events: InvestigationEvent[] = [];
+    const { browsers, launch } = trackedLaunch();
+    const record = await investigate(
+      { complaint: COMPLAINT, storeUrl: faultyStore.url },
+      {
+        provider: cartInvestigatorDouble(),
+        settings: testSettings(),
+        runsDir,
+        launchBrowser: launch,
+        onEvent: (event) => {
+          events.push(event);
+          throw new Error('listener failure');
+        },
+      },
+    );
+    assert.equal(record.verdict, 'Reproduced');
+    assert.equal(record.endReason, 'report_submitted');
+    assert.ok(browsers.every((b) => !b.isConnected()));
+    const actions = events.flatMap((e) => (e.type === 'action' ? [e.action.id] : []));
+    const observations = events.flatMap((e) => (e.type === 'observation' ? [e.observation.id] : []));
+    assert.deepEqual(actions, record.actions.map((a) => a.id));
+    assert.deepEqual(observations, record.observations.map((o) => o.id));
+    const finished = events.filter((e) => e.type === 'model_request_finished');
+    assert.equal(finished.length, record.providerCalls.length);
+    assert.deepEqual(events.at(-1), {
+      type: 'run_finished',
+      at: record.finishedAt,
+      verdict: 'Reproduced',
+      verdictCode: 'reproduced',
+      endReason: 'report_submitted',
+    });
   });
 });

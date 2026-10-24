@@ -41,7 +41,33 @@ export type InvestigatorDeps = {
   launchBrowser?: () => Promise<Browser>;
   actionTimeoutMs?: number;
   retryBaseDelayMs?: number;
+  // Optional progress listener. It receives only what the run records (actions,
+  // observations, model-call metadata, tool errors), never model text. A
+  // listener that throws cannot affect the run.
+  onEvent?: (event: InvestigationEvent) => void;
 };
+
+export type InvestigationEvent =
+  | { type: 'run_started'; at: string; runId: string; limits: { maxBrowserToolCalls: number; deadlineMs: number } }
+  | { type: 'action'; at: string; action: RecordedAction }
+  | {
+      type: 'observation';
+      at: string;
+      observation: Pick<RecordedObservation, 'id' | 'trigger' | 'url' | 'screenshot' | 'fields'>;
+    }
+  | { type: 'model_request_started'; at: string; id: string; attempt: number }
+  | { type: 'model_request_finished'; at: string; call: ProviderCallRecord }
+  | {
+      type: 'browser_tool_requested';
+      at: string;
+      tool: string;
+      callNumber: number;
+      elementId?: string;
+      target?: { role: string; name: string; fromObservation: string };
+    }
+  | { type: 'tool_error'; at: string; error: ToolErrorRecord }
+  | { type: 'report_submitted'; at: string; proposedVerdict: VerdictCode; citations: number }
+  | { type: 'run_finished'; at: string; verdict: string; verdictCode: VerdictCode; endReason: EndReason };
 
 export type EndReason =
   | 'report_submitted'
@@ -178,6 +204,37 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
   let verdictReasons: string[] = [];
   let endReason: EndReason = 'execution_error';
 
+  const emit = (event: InvestigationEvent) => {
+    try {
+      deps.onEvent?.(event);
+    } catch {
+      // Progress reporting must never change the investigation.
+    }
+  };
+  // Reports actions and observations as the session records them.
+  let emittedActions = 0;
+  let emittedObservations = 0;
+  const emitRecorded = () => {
+    for (const action of session.actions.slice(emittedActions)) {
+      emit({ type: 'action', at: new Date().toISOString(), action: structuredClone(action) });
+    }
+    emittedActions = session.actions.length;
+    for (const o of session.observations.slice(emittedObservations)) {
+      emit({
+        type: 'observation',
+        at: new Date().toISOString(),
+        observation: structuredClone({ id: o.id, trigger: o.trigger, url: o.url, screenshot: o.screenshot, fields: o.fields }),
+      });
+    }
+    emittedObservations = session.observations.length;
+  };
+  emit({
+    type: 'run_started',
+    at: new Date(startedAt).toISOString(),
+    runId,
+    limits: { maxBrowserToolCalls: settings.maxBrowserToolCalls, deadlineMs: settings.deadlineMs },
+  });
+
   const remainingMs = () => deadline - Date.now();
   const budget = () => ({
     browser_tool_calls_used: browserToolCalls,
@@ -205,6 +262,7 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
         ok: false,
       };
       providerCalls.push(call);
+      emit({ type: 'model_request_started', at: call.startedAt, id: call.id, attempt });
       try {
         const response = await withinDeadline(
           provider.createMessage(
@@ -228,14 +286,17 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
           cacheReadInputTokens: response.usage.cache_read_input_tokens ?? 0,
         };
         for (const key of Object.keys(usage) as (keyof TokenUsage)[]) usage[key] += call.usage[key];
+        emit({ type: 'model_request_finished', at: new Date().toISOString(), call: structuredClone(call) });
         return response;
       } catch (error) {
         call.durationMs = Date.now() - Date.parse(call.startedAt);
         if (controller.signal.aborted || error instanceof DeadlineExceeded) {
           call.error = { kind: 'DeadlineExceeded', message: 'Run deadline reached during the model request' };
+          emit({ type: 'model_request_finished', at: new Date().toISOString(), call: structuredClone(call) });
           throw new DeadlineExceeded();
         }
         call.error = describeProviderError(error);
+        emit({ type: 'model_request_finished', at: new Date().toISOString(), call: structuredClone(call) });
         const delayMs = (deps.retryBaseDelayMs ?? 1_000) * 2 ** (attempt - 1);
         if (!isRetryable(error) || attempt > settings.maxProviderRetries || delayMs >= remainingMs()) {
           throw new RunEnded(
@@ -251,7 +312,9 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
 
   const recordToolError = (tool: string, kind: ToolErrorRecord['kind'], message: string): string => {
     const id = `err-${toolErrors.length + 1}`;
-    toolErrors.push({ id, at: new Date().toISOString(), tool, kind, message });
+    const record: ToolErrorRecord = { id, at: new Date().toISOString(), tool, kind, message };
+    toolErrors.push(record);
+    emit({ type: 'tool_error', at: record.at, error: { ...record } });
     return `${id}: ${message}`;
   };
 
@@ -289,7 +352,9 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
     let initial: RecordedObservation;
     try {
       initial = await withinDeadline(session.start());
+      emitRecorded();
     } catch (error) {
+      emitRecorded();
       if (error instanceof DeadlineExceeded) throw error;
       throw new RunEnded('store_unreachable', `Could not open the store page: ${firstLine(error)}`);
     }
@@ -327,6 +392,12 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
           const parsed = parseReport(use.input);
           if (parsed.ok) {
             report = parsed.report;
+            emit({
+              type: 'report_submitted',
+              at: new Date().toISOString(),
+              proposedVerdict: report.verdict,
+              citations: report.evidence.length,
+            });
             break;
           }
           malformedReports++;
@@ -342,7 +413,12 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
           );
         }
         browserToolCalls++;
-        results.push(await runBrowserTool(use));
+        emit(toolRequestEvent(use, browserToolCalls, session.latestObservation));
+        try {
+          results.push(await runBrowserTool(use));
+        } finally {
+          emitRecorded();
+        }
       }
       if (!report) transcript.push({ role: 'user', content: results });
     }
@@ -403,7 +479,28 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
   };
   await writeFile(join(runDir, 'run.json'), JSON.stringify(record, null, 2));
   await writeFile(join(runDir, 'transcript.json'), JSON.stringify({ system, messages: transcript }, null, 2));
+  emitRecorded();
+  emit({ type: 'run_finished', at: record.finishedAt, verdict: record.verdict, verdictCode: verdict, endReason });
   return record;
+}
+
+function toolRequestEvent(
+  use: Anthropic.ToolUseBlock,
+  callNumber: number,
+  latest: RecordedObservation | undefined,
+): InvestigationEvent {
+  const at = new Date().toISOString();
+  const elementId = (use.input as Record<string, unknown> | null)?.element_id;
+  if (use.name !== 'click_element' || typeof elementId !== 'string') return { type: 'browser_tool_requested', at, tool: use.name, callNumber };
+  const element = latest?.elements.find((e) => e.elementId === elementId);
+  return {
+    type: 'browser_tool_requested',
+    at,
+    tool: use.name,
+    callNumber,
+    elementId,
+    ...(element && latest ? { target: { role: element.role, name: element.name, fromObservation: latest.id } } : {}),
+  };
 }
 
 function systemPrompt(settings: InvestigatorSettings): string {

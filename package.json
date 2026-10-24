@@ -7,6 +7,7 @@
     "node": ">=22.18.0"
   },
   "scripts": {
+    "start": "node --env-file-if-exists=.env scripts/start.ts",
     "browsers": "playwright install chromium",
     "store": "node demo-store/start.ts",
     "smoke": "node scripts/smoke.ts",
