@@ -3,17 +3,14 @@
 // mapping and the expected verdicts live only in this harness and in the
 // manifest written after both runs; the investigator never receives them.
 // Failures are reported as they are, with no retries.
-import { once } from 'node:events';
-import { randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
-import type { AddressInfo } from 'node:net';
 import { join, relative } from 'node:path';
-import { createStoreServer } from '../demo-store/server.ts';
 import type { Fixture } from '../demo-store/pricing.ts';
 import { loadConfig } from '../src/config.ts';
 import { investigate, type RunRecord } from '../src/investigator.ts';
 import { createAnthropicProvider } from '../src/provider.ts';
 import { formatRunSummary } from '../src/summary.ts';
+import { identifyStore, opaqueRunId, startStore, timestamp } from './harness.ts';
 
 const COMPLAINT = 'When I increase the quantity in my cart, the total stays the same.';
 const TRIALS: { fixture: Fixture; expectedVerdict: RunRecord['verdictCode'] }[] = [
@@ -30,19 +27,19 @@ if (!loaded.ok) {
 const { apiKey, settings } = loaded.config;
 console.log(`Model: ${settings.model}; max output tokens per response: ${settings.maxOutputTokens}`);
 
-const trialDir = join(repoRoot, 'runs', `trials-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+const trialDir = join(repoRoot, 'runs', `trials-${timestamp()}`);
 await mkdir(trialDir, { recursive: true });
 const provider = createAnthropicProvider(apiKey);
 const manifest: object[] = [];
 let matched = 0;
 
 for (const { fixture, expectedVerdict } of TRIALS) {
-  const server = createStoreServer(fixture);
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const storeUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
-  const runId = `run-${randomBytes(4).toString('hex')}`;
+  const store = await startStore(fixture);
+  const storeUrl = store.url;
+  const runId = opaqueRunId();
   try {
+    const answering = await identifyStore(storeUrl);
+    if (answering !== fixture) throw new Error(`Expected the ${fixture} store at ${storeUrl}, found ${answering}`);
     const record = await investigate({ complaint: COMPLAINT, storeUrl }, { provider, settings, runsDir: trialDir, runId });
     const asExpected = record.verdictCode === expectedVerdict;
     if (asExpected) matched++;
@@ -50,8 +47,7 @@ for (const { fixture, expectedVerdict } of TRIALS) {
     console.log(`\n[${fixture} fixture] expected ${expectedVerdict}, got ${record.verdictCode}`);
     console.log(formatRunSummary(record, repoRoot));
   } finally {
-    server.close();
-    server.closeAllConnections();
+    store.close();
   }
 }
 

@@ -14,7 +14,8 @@
     "typecheck": "tsc",
     "investigate": "node --env-file-if-exists=.env scripts/investigate.ts",
     "trials": "node --env-file-if-exists=.env scripts/live-trials.ts",
-    "test": "node --test --test-concurrency=1 'test/**/*.test.ts'"
+    "test": "node --test --test-concurrency=1 'test/**/*.test.ts'",
+    "eval": "node --env-file-if-exists=.env scripts/eval.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "1.2.0",

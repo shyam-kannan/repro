@@ -8,12 +8,20 @@ Current state: the demo store, a deterministic browser smoke test, the
 smallest working investigator (a model-driven tool loop with code-enforced
 limits and evidence checks), and a minimal local web UI on top of it.
 
-**Feasibility, not reliability.** Live runs so far are four investigations of
-one complaint against one controlled store: two from `npm run trials` and two
-through the UI, one per fixture each time. All four reached the expected
-verdict with validated evidence. That shows the pipeline works end to end with
-a real model. It does not measure how often it is right: there is one bug, one
-complaint and no repeated or harder trials yet.
+**Feasibility and early consistency, not proven reliability.** Measured so far
+with `claude-haiku-5-5`, all against one controlled store with one bug:
+
+- 4 early live runs (2 from `npm run trials`, 2 through the UI): all matched.
+- The 8-case evaluation (`npm run eval`, see
+  [docs/evaluation-2026-10-24.md](docs/evaluation-2026-10-24.md)): **8/8
+  matched**. That is 3/3 Not reproduced on the correct store, 3/3 Reproduced
+  on the faulty store, Inconclusive with the store down (decided by code, no
+  model call), and Inconclusive for an unrelated search complaint. Every
+  citation matched its observation and screenshot.
+
+That is a small sample of one obvious bug with one complaint phrasing, and it
+cannot rule out a meaningful error rate. Harder bugs and more runs are needed
+before any reliability claim.
 
 ## Setup on a fresh checkout
 
@@ -66,6 +74,7 @@ Open the Repro URL, pick the example complaint (or type one), and click
 | --- | --- |
 | `npm start` | Demo store plus the Repro web UI (see Quick start). Needs `.env` to investigate. |
 | `npm test` | Offline tests: investigator, server API and the browser flow through the UI. All model responses come from a scripted test double; no API calls. |
+| `npm run eval` | The 8-case live evaluation (see below). Needs `.env`. Exits nonzero on any mismatch. |
 | `npm run trials` | The two initial live trials (same complaint, each store fixture). Needs `.env`. |
 | `npm run investigate -- --url <store URL> [--expected "..."] "<complaint>"` | One live investigation. Needs `.env`. |
 | `npm run smoke` | Runs the cart flow against both store fixtures and checks the labeled observations. Exits nonzero if any check fails. |
@@ -263,3 +272,46 @@ key, then one Investigate click per fixture.
   search or comparison between runs.
 - Progress shows recorded events and elapsed time only. There are no
   percentages, because the number of steps a run needs is not known in advance.
+
+## Evaluation
+
+```sh
+REPRO_MAX_OUTPUT_TOKENS=2048 npm run eval
+```
+
+This runs eight live investigations, each once, with the configured model,
+the unchanged prompts and the standard limits:
+
+| Case | Store | Complaint | Expected |
+| --- | --- | --- | --- |
+| correct-1..3 | correct | the cart complaint | Not reproduced in this run |
+| faulty-1..3 | faulty | the cart complaint | Reproduced |
+| store-unavailable | nothing listening | the cart complaint | Inconclusive |
+| unrelated-complaint | correct | "Searching for headphones returns no results." | Inconclusive |
+
+The expected verdicts and store setups live only in `scripts/eval.ts`. The
+investigator receives the complaint and a URL, and the run IDs are opaque.
+
+Before each run, `scripts/harness.ts` (shared with `npm run trials`) starts a
+fresh store on an OS-assigned port, so ports cannot collide. It then confirms
+which fixture is answering by pricing two mugs through the store API: $40.00
+means correct, $20.00 means faulty. For the unavailable case it confirms the
+connection is refused. Every investigation launches its own Chromium process
+and context. Failures are recorded, never retried.
+
+Output goes to `runs/eval-<timestamp>/` (git-ignored):
+
+- one directory per run, in the usual run format
+- `results.jsonl`, written as each run finishes
+- `summary.json` and `summary.md`: expected and actual verdict, end reason,
+  duration, tokens, model requests, tool calls, whether the evidence checks
+  passed, and the screenshot check
+- `contact-sheet.html` and `contact-sheet.png`: every cited observation's
+  screenshot beside its recorded and cited values, for checking by eye
+
+The screenshot check is automatic for existence, a valid PNG and a screenshot
+for every cited observation. Whether an image shows the cited values is
+checked by eye on the contact sheet.
+
+`test/eval.test.ts` runs the same pipeline offline with the scripted test
+double. That checks the harness, not the model.
