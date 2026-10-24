@@ -11,6 +11,7 @@ import { join, relative, resolve } from 'node:path';
 import { chromium } from 'playwright';
 import type { Fixture } from '../demo-store/pricing.ts';
 import { loadConfig, type InvestigatorSettings } from '../src/config.ts';
+import { describeCoverage } from '../src/coverage.ts';
 import { investigate, type RunRecord } from '../src/investigator.ts';
 import { createAnthropicProvider, type ModelProvider } from '../src/provider.ts';
 import { identifyStore, opaqueRunId, startStore, timestamp, unavailableStoreUrl } from './harness.ts';
@@ -67,6 +68,8 @@ export type CaseResult = {
   endReason: string | null;
   verdictReasons: string[];
   modelProposed: string | null;
+  downgradeRule: string | null;
+  coverage: string | null;
   durationMs: number | null;
   inputTokens: number;
   outputTokens: number;
@@ -258,6 +261,8 @@ async function resultFromRecord(
       endReason: record.endReason,
       verdictReasons: record.verdictReasons,
       modelProposed: record.modelReport?.verdict ?? null,
+      downgradeRule: record.downgrade?.rule ?? null,
+      coverage: (record.coverage ?? describeCoverage(record.observations, record.actions)).summary,
       durationMs: record.durationMs,
       inputTokens: record.usage.inputTokens,
       outputTokens: record.usage.outputTokens,
@@ -286,6 +291,8 @@ function emptyResult(base: Pick<CaseResult, 'caseId' | 'store' | 'complaint' | '
     endReason: null,
     verdictReasons: [],
     modelProposed: null,
+    downgradeRule: null,
+    coverage: null,
     durationMs: null,
     inputTokens: 0,
     outputTokens: 0,
@@ -334,6 +341,9 @@ function explore(record: RunRecord): Exploration {
 // Separates "never reached the bug" from "saw the bug and reported otherwise".
 function analyseMismatch(record: RunRecord, expected: RunRecord['verdictCode']): string {
   const { maxQuantity, wrongTotals, clicks } = explore(record);
+  if (record.downgrade?.rule === 'demo_cart_total_equals_unit_price_times_quantity') {
+    return `Claim contradicted its own evidence and was downgraded: the model proposed ${record.downgrade.from}, final verdict ${record.verdictCode}. ${record.downgrade.reasons.join(' ')}`;
+  }
   if (expected === 'reproduced' && record.verdictCode === 'not_reproduced') {
     if (wrongTotals.length === 0) {
       return (

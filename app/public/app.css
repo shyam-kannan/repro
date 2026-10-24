@@ -190,6 +190,16 @@ blockquote.complaint {
 .verdict.inconclusive, .verdict.failed, .verdict.interrupted { background: var(--warn-bg); color: var(--warn-fg); border-color: var(--warn-border); }
 .verdict ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
 .verdict.running { border-color: var(--accent); }
+.verdict .proposed { margin-bottom: 0.3rem; }
+.verdict .coverage {
+  margin-top: 0.7rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.verdict .coverage-label { font-weight: 700; }
 .counters { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-top: 0.4rem; font-size: 0.9rem; }
 .spinner {
   display: inline-block;

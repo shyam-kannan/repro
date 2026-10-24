@@ -24,12 +24,16 @@ with `claude-haiku-5-5`, all against one controlled store with one bug:
   were all Reproduced, and the correct-store control was Not reproduced.
 
 **Known limitation: exploration depth.** The investigator decides for itself
-when to stop clicking. In 4 of the 9 live runs that saw a correct total after
-the first click, it stopped there, which would miss a bug starting at
-quantity 3. No run went past quantity 3. Also, Repro's code does not check
-that a verdict agrees with the cited values. An offline test shows it keeps a
-"Not reproduced" claim whose own evidence shows a wrong total. Details are in
-the evaluation notes.
+when to stop clicking. Four correct-store runs stopped after one click, and
+no run went past quantity 3. The three faulty-from-3 runs all reached
+quantity 3 and found the bug. This is evidence of limited exploration, not a
+measured miss rate. Each report now states what it covered (e.g. "Tested
+quantities: 1, 2. Clicked button “Increase quantity” once."), so a narrow
+"Not reproduced" is visible as narrow.
+
+A "Not reproduced" claim that the run's own observations contradict is
+downgraded to Inconclusive under a rule scoped to this demo's cart pricing
+(see "Rules enforced by code"). Details are in the evaluation notes.
 
 That is a small sample of simple bugs with one complaint phrasing, and it
 cannot rule out a meaningful error rate. More runs and harder bugs are needed
@@ -183,6 +187,8 @@ With both set, the SDK reads none of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`
 | Evidence IDs | `obs-N`, `act-N`, `err-N` and `call-N` are assigned by code. Screenshots are `obs-N.png`. |
 | Citation check | The cited observation must show exactly one field with that label, and its value must equal the quoted value. A matching number under another label fails. |
 | Exercised scenario | Reproduced and Not reproduced both need citations of at least two labels, before and after a successful click, with at least one value changed. Otherwise the verdict is Inconclusive. |
+| Demo cart pricing | A "Not reproduced" verdict becomes Inconclusive if any recorded observation shows Total ≠ Unit price × Quantity. Scoped to this demo: it applies only if the complaint mentions the total and the quantity, each observation shows one Unit price, Quantity and Total, and no discount, tax, shipping, fee or subtotal labels appear. The reason names the observation IDs and values. It uses browser observations only. |
+| Coverage | Each record has `coverage`, derived from recorded actions and observations: the distinct quantities observed and the clicks made. Limited coverage never changes the verdict; it is reported beside it. |
 | Failures | Refusal, a response cut off by the output-token limit, no report, a report malformed twice, an unreachable store, or an unexpected error each give Inconclusive with a reason. |
 
 The model judges what the complaint means, which actions to take, what the
@@ -195,7 +201,9 @@ listed assumptions.
 
 Each run is saved to `runs/<run-id>/`:
 
-- `run.json`: verdict and reasons, end reason, model report, checked evidence,
+- `run.json`: final verdict and reasons, the model's `proposedVerdict`, any
+  `downgrade` (from, to, rule, reasons), `cartPricingCheck`, `coverage`, end
+  reason, model report, checked evidence,
   actions, observations (labeled values, clickable elements, accessibility
   outline), tool errors, blocked requests, model calls with token usage, total
   usage, duration and cleanup status.

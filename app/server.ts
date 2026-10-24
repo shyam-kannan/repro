@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import type { InvestigatorSettings } from '../src/config.ts';
 import { investigate, type InvestigationEvent, type RunRecord } from '../src/investigator.ts';
 import type { ModelProvider } from '../src/provider.ts';
+import { describeCoverage } from '../src/coverage.ts';
 import type { Browser } from 'playwright';
 
 export const EXAMPLE_COMPLAINTS = ['When I increase the quantity in my cart, the total stays the same.'];
@@ -339,9 +340,15 @@ async function listRuns(runsDir: string): Promise<RunStatus[]> {
 }
 
 // The saved record minus the server's filesystem path.
+// Records saved before coverage and proposedVerdict existed get them derived
+// here from their own actions and observations; the file is never rewritten.
 function publicRecord(record: RunRecord) {
   const { runDir: _runDir, ...rest } = record;
-  return rest;
+  return {
+    ...rest,
+    proposedVerdict: rest.proposedVerdict ?? rest.modelReport?.verdict ?? null,
+    coverage: rest.coverage ?? describeCoverage(rest.observations, rest.actions),
+  };
 }
 
 async function sendScreenshot(res: ServerResponse, dir: string, file: string) {

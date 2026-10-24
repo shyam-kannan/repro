@@ -473,23 +473,46 @@ function renderFinished(runId, data) {
   );
 }
 
+const VERDICT_LABEL = { reproduced: 'Reproduced', not_reproduced: 'Not reproduced in this run', inconclusive: 'Inconclusive' };
+
+const DOWNGRADE_TEXT = {
+  citation_mismatch: 'Evidence validation failure: a cited value did not match the recorded page.',
+  scenario_not_exercised: 'Evidence rule: the report did not show the scenario was exercised.',
+  demo_cart_total_equals_unit_price_times_quantity:
+    'Contradicted by its own evidence (demo cart pricing rule: Total = Unit price × Quantity, one item, no discounts, tax or shipping).',
+};
+
 function verdictPanel(record, runStatus) {
   const reasons = [];
   const endText = END_REASON_TEXT[record.endReason];
   if (endText) reasons.push(endText);
-  const badEvidence = record.evidence.some((c) => !c.ok);
-  if (record.endReason === 'report_submitted' && record.modelReport && record.verdictCode !== record.modelReport.verdict) {
-    reasons.push(
-      `${badEvidence ? 'Evidence validation failure' : 'Evidence rule'}: Repro downgraded the model's proposed verdict (${record.modelReport.verdict.replace('_', ' ')}) to Inconclusive.`,
-    );
-  }
+  const downgrade = record.downgrade;
+  // Older records have no downgrade field; fall back to comparing verdicts.
+  const legacyDowngrade = !downgrade && record.proposedVerdict && record.proposedVerdict !== record.verdictCode;
+  if (downgrade) reasons.push(DOWNGRADE_TEXT[downgrade.rule] ?? `Downgraded by rule ${downgrade.rule}.`);
+  else if (legacyDowngrade) reasons.push('Repro downgraded the model’s proposed verdict.');
+  const proposed = downgrade?.from ?? (legacyDowngrade ? record.proposedVerdict : null);
   return h(
     'section',
     { class: `verdict ${record.verdictCode}`, 'data-verdict': record.verdictCode },
     h('div', { class: 'kicker' }, 'Verdict'),
     h('div', { class: 'verdict-label' }, record.verdict),
+    proposed
+      ? h('div', { class: 'proposed', 'data-proposed': proposed }, 'Model proposed: ', h('strong', {}, VERDICT_LABEL[proposed] ?? proposed), ' → final verdict: ', h('strong', {}, record.verdict))
+      : null,
     h('div', {}, VERDICT_TEXT[record.verdictCode]),
     reasons.length || record.verdictReasons.length ? h('ul', {}, [...reasons, ...record.verdictReasons].map((r) => h('li', {}, r))) : null,
+    record.coverage
+      ? h(
+          'div',
+          { class: 'coverage', 'data-coverage': true },
+          h('span', { class: 'coverage-label' }, 'Covered in this run: '),
+          record.coverage.summary,
+          record.verdictCode === 'not_reproduced'
+            ? h('div', { class: 'small' }, 'This verdict applies only to the states listed. Values that were never observed were not tested.')
+            : null,
+        )
+      : null,
     runStatus.state === 'interrupted' ? h('p', {}, runStatus.error) : null,
   );
 }

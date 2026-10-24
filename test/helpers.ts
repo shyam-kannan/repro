@@ -111,6 +111,29 @@ export function cartInvestigatorDouble(): ScriptedProvider {
   });
 }
 
+// Clicks "Increase quantity" twice, then claims Not reproduced, citing only the
+// first two observations (valid citations, quantity changed). On a store whose
+// total breaks at quantity 3, its third observation contradicts the claim.
+export function twoClickNotReproducedDouble(): ScriptedProvider {
+  const seen: ModelObservation[] = [];
+  return scriptedProvider(({ request }) => {
+    const observation = latestObservation(request);
+    seen.push(observation);
+    if (seen.length <= 2) return reply([toolUse('click_element', { element_id: elementNamed(observation, 'Increase quantity') })]);
+    const cite = (o: ModelObservation, label: string) => ({ observation_id: o.observation_id, label, value: valueOf(o, label) });
+    return reply([
+      toolUse('finish_investigation', {
+        verdict: 'not_reproduced',
+        expected_behavior: 'The total increases when the quantity increases.',
+        assumptions: [],
+        observed_behavior: 'The total updated when the quantity increased.',
+        evidence: [cite(seen[0], 'Quantity'), cite(seen[0], 'Total'), cite(seen[1], 'Quantity'), cite(seen[1], 'Total')],
+        explanation: 'The total changed after increasing the quantity.',
+      }),
+    ]);
+  });
+}
+
 export async function startStore(fixture: Fixture): Promise<{ url: string; close: () => void }> {
   const server = createStoreServer(fixture);
   server.listen(0, '127.0.0.1');

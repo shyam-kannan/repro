@@ -22,8 +22,11 @@ import {
   testSettings,
   toolUse,
   trackedLaunch,
+  twoClickNotReproducedDouble,
   type ScriptedProvider,
 } from './helpers.ts';
+import { checkCartPricing } from '../src/cart-pricing-rule.ts';
+import type { RecordedObservation } from '../src/browser-session.ts';
 
 const COMPLAINT = 'When I increase the quantity in my cart, the total stays the same.';
 
@@ -455,5 +458,97 @@ describe('progress events', () => {
       verdictCode: 'reproduced',
       endReason: 'report_submitted',
     });
+  });
+});
+
+describe('coverage and the demo cart pricing rule', () => {
+  let fromThreeStore: { url: string; close: () => void };
+  before(async () => {
+    fromThreeStore = await startStore('faulty-from-3');
+  });
+  after(() => fromThreeStore.close());
+
+  test('a contradicted "Not reproduced" is downgraded, naming the observation and values', async () => {
+    const { record } = await run(twoClickNotReproducedDouble(), { storeUrl: fromThreeStore.url });
+    assert.equal(record.proposedVerdict, 'not_reproduced');
+    assert.equal(record.verdictCode, 'inconclusive');
+    assert.equal(record.verdict, 'Inconclusive');
+    assert.ok(record.evidence.every((c) => c.ok), 'every citation is valid; only uncited obs-3 contradicts');
+    assert.deepEqual(record.downgrade && { ...record.downgrade, reasons: record.downgrade.reasons.length }, {
+      from: 'not_reproduced',
+      to: 'inconclusive',
+      rule: 'demo_cart_total_equals_unit_price_times_quantity',
+      reasons: 1,
+    });
+    assert.equal(
+      record.verdictReasons[0],
+      'The model reported "Not reproduced", but its own recorded observations contradict that under the demo cart ' +
+        'pricing assumption: one line item, no discounts, tax, shipping or fees, so Total = Unit price × Quantity: ' +
+        'obs-3 shows Quantity 3 and Unit price $20.00, so Total should be $60.00, but it shows Total $40.00.',
+    );
+    assert.equal(record.coverage.summary, 'Tested quantities: 1, 2, 3. Clicked button “Increase quantity” twice.');
+    assert.equal(record.modelReport?.verdict, 'not_reproduced', 'the model report itself is preserved');
+  });
+
+  test('a valid negative that only explored quantities 1 and 2 keeps its verdict and states its coverage', async () => {
+    const { record } = await run(cartInvestigatorDouble(), { storeUrl: fromThreeStore.url });
+    assert.equal(record.verdictCode, 'not_reproduced', 'limited coverage alone is not a downgrade');
+    assert.equal(record.proposedVerdict, 'not_reproduced');
+    assert.equal(record.downgrade, null);
+    assert.deepEqual(record.cartPricingCheck, { applies: true, contradictions: [] });
+    assert.deepEqual(record.coverage.quantitiesObserved, ['1', '2']);
+    assert.equal(record.coverage.summary, 'Tested quantities: 1, 2. Clicked button “Increase quantity” once.');
+  });
+
+  test('the rule does not apply to a complaint about something else', async () => {
+    const provider = twoClickNotReproducedDouble();
+    const { browsers, launch } = trackedLaunch();
+    const record = await investigate(
+      { complaint: 'Searching for headphones returns no results.', storeUrl: fromThreeStore.url },
+      { provider, settings: testSettings(), runsDir, launchBrowser: launch },
+    );
+    assert.ok(browsers.every((b) => !b.isConnected()));
+    assert.equal(record.verdictCode, 'not_reproduced');
+    assert.equal(record.downgrade, null);
+    assert.deepEqual(record.cartPricingCheck, { applies: false, why: 'the complaint is not about the cart total and quantity' });
+  });
+});
+
+describe('checkCartPricing scope', () => {
+  const observation = (id: string, fields: [string, string][]) =>
+    ({ id, fields: fields.map(([label, value]) => ({ label, value, path: '' })) }) as unknown as RecordedObservation;
+  const cartComplaint = 'When I increase the quantity in my cart, the total stays the same.';
+
+  test('flags a total that differs from unit price × quantity', () => {
+    const result = checkCartPricing(cartComplaint, [
+      observation('obs-1', [['Unit price', '$20.00'], ['Quantity', '2'], ['Total', '$40.00']]),
+      observation('obs-2', [['Unit price', '$20.00'], ['Quantity', '3'], ['Total', '$40.00']]),
+    ]);
+    assert.deepEqual(result, {
+      applies: true,
+      contradictions: [{ observation: 'obs-2', quantity: 3, unitPrice: '$20.00', total: '$40.00', expectedTotal: '$60.00' }],
+    });
+  });
+
+  test('does not apply when the page shows other price components', () => {
+    for (const label of ['Shipping', 'Tax', 'Discount', 'Subtotal', 'Coupon savings']) {
+      const result = checkCartPricing(cartComplaint, [
+        observation('obs-1', [['Unit price', '$20.00'], ['Quantity', '3'], [label, '$5.00'], ['Total', '$65.00']]),
+      ]);
+      assert.equal(result.applies, false, label);
+    }
+  });
+
+  test('does not apply to multiple line items or unreadable values', () => {
+    assert.equal(
+      checkCartPricing(cartComplaint, [
+        observation('obs-1', [['Unit price', '$20.00'], ['Quantity', '1'], ['Unit price', '$5.00'], ['Quantity', '1'], ['Total', '$25.00']]),
+      ]).applies,
+      false,
+    );
+    assert.equal(
+      checkCartPricing(cartComplaint, [observation('obs-1', [['Unit price', '20 EUR'], ['Quantity', '1'], ['Total', '20 EUR']])]).applies,
+      false,
+    );
   });
 });

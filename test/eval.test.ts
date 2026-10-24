@@ -130,7 +130,7 @@ describe('faulty-from-3 analysis (test double)', () => {
     };
   }
 
-  test('a one-click run that misses the bug is "not discovered"; a claim against recorded evidence is flagged', async () => {
+  test('a one-click run that misses the bug is "not discovered"; a claim against recorded evidence is downgraded', async () => {
     const cases = FAULTY_FROM_3_CASES.filter((c) => c.id === 'faulty-from-3-1' || c.id === 'correct-control');
     const missed = await runEvaluation({
       provider: perRunCartDouble(),
@@ -157,10 +157,13 @@ describe('faulty-from-3 analysis (test double)', () => {
       log: () => {},
     });
     const [run] = contradicted.results;
-    assert.equal(run.actual, 'Not reproduced in this run', 'citations are valid, so code keeps the verdict');
+    assert.equal(run.actual, 'Inconclusive', 'the demo cart pricing rule downgrades the contradicted claim');
+    assert.equal(run.modelProposed, 'not_reproduced');
+    assert.equal(run.downgradeRule, 'demo_cart_total_equals_unit_price_times_quantity');
     assert.deepEqual(run.exploration?.quantities, ['1', '2', '3']);
     assert.deepEqual(run.exploration?.wrongTotals, [{ observation: 'obs-3', quantity: '3', total: '$40.00', expectedTotal: '$60.00' }]);
-    assert.match(run.mismatchAnalysis ?? '', /^Claim contradicts its own evidence: obs-3 shows quantity 3 with total \$40\.00 \(expected \$60\.00\)/);
+    assert.match(run.mismatchAnalysis ?? '', /^Claim contradicted its own evidence and was downgraded: the model proposed not_reproduced, final verdict inconclusive\./);
+    assert.match(run.mismatchAnalysis ?? '', /obs-3 shows Quantity 3 and Unit price \$20\.00, so Total should be \$60\.00, but it shows Total \$40\.00/);
 
     // The command line path, run as a real process: rebuilds the summary from the
     // saved records without investigating (this path once failed on init order).

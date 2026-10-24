@@ -101,6 +101,9 @@ export function parseReport(input: unknown): { ok: true; report: SubmittedReport
   return { ok: true, report: input as SubmittedReport };
 }
 
+// Code rules that can turn the model's verdict into Inconclusive.
+export type DowngradeRule = 'citation_mismatch' | 'scenario_not_exercised' | 'demo_cart_total_equals_unit_price_times_quantity';
+
 export type CheckedCitation = Citation & { ok: boolean; problem?: string; screenshot?: string };
 
 // A citation holds only if the cited observation shows exactly one field with
@@ -138,11 +141,12 @@ export function decideVerdict(
   citations: CheckedCitation[],
   observations: RecordedObservation[],
   actions: RecordedAction[],
-): { verdict: VerdictCode; reasons: string[] } {
+): { verdict: VerdictCode; reasons: string[]; rule?: DowngradeRule } {
   const failed = citations.filter((c) => !c.ok);
   if (failed.length > 0) {
     return {
       verdict: 'inconclusive',
+      rule: 'citation_mismatch',
       reasons: failed.map((c) => `Evidence did not match the recorded page: ${c.problem}.`),
     };
   }
@@ -154,12 +158,14 @@ export function decideVerdict(
   if (clicks.length === 0) {
     return {
       verdict: 'inconclusive',
+      rule: 'scenario_not_exercised',
       reasons: [`No action on the page succeeded, so the reported scenario was not exercised (proposed: ${report.verdict}).`],
     };
   }
   if (!showsExercisedScenario(citations, observations, clicks)) {
     return {
       verdict: 'inconclusive',
+      rule: 'scenario_not_exercised',
       reasons: [
         `The report does not show the scenario was exercised (proposed: ${report.verdict}). It must cite at least ` +
           'two labeled values both before and after a successful action, with at least one value changed.',

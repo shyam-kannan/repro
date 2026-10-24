@@ -8,6 +8,8 @@ export function formatRunSummary(record: RunRecord, root: string): string {
     `Run ${record.runId}  (${dir}/)`,
     `  Provider: ${record.provider}; model: ${record.settings.model}`,
     `  Verdict: ${record.verdict}${record.verdictReasons.length ? ` — ${record.verdictReasons.join(' ')}` : ''}`,
+    ...(record.downgrade ? [`  Model proposed: ${record.downgrade.from}; downgraded by ${record.downgrade.rule}`] : []),
+    `  Coverage: ${record.coverage.summary}`,
     `  End reason: ${record.endReason}`,
     `  Duration: ${(record.durationMs / 1000).toFixed(1)}s, browser tool calls: ${record.browserToolCalls}/${record.settings.maxBrowserToolCalls}`,
     `  Tokens: input ${record.usage.inputTokens}, output ${record.usage.outputTokens}` +

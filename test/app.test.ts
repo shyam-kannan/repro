@@ -14,6 +14,7 @@ import { createReproServer, type ReproServer } from '../app/server.ts';
 import type { ModelProvider } from '../src/provider.ts';
 import {
   cartInvestigatorDouble,
+  twoClickNotReproducedDouble,
   scriptedProvider,
   startStore,
   tempRunsDir,
@@ -41,14 +42,14 @@ type Harness = { base: string; repro: ReproServer; runsDir: string; close: () =>
 
 async function startRepro(
   provider: ModelProvider | null,
-  options: { runsDir?: string; deadlineMs?: number; watchdogGraceMs?: number } = {},
+  options: { runsDir?: string; deadlineMs?: number; watchdogGraceMs?: number; storeUrl?: string } = {},
 ): Promise<Harness> {
   const runsDir = options.runsDir ?? (await tempRunsDir());
   const repro = await createReproServer({
     provider,
     configProblems: provider ? [] : ['REPRO_ANTHROPIC_API_KEY is not set'],
     settings: provider ? testSettings(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}) : null,
-    storeUrl: store.url,
+    storeUrl: options.storeUrl ?? store.url,
     runsDir,
     watchdogGraceMs: options.watchdogGraceMs,
   });
@@ -442,6 +443,71 @@ describe('browser flow (test double)', () => {
       release();
       await page.context().close();
       await h.close().catch(() => {});
+    }
+  });
+});
+
+describe('coverage and downgrade display (test double)', () => {
+  let fromThree: { url: string; close: () => void };
+  before(async () => {
+    fromThree = await startStore('faulty-from-3');
+  });
+  after(() => fromThree.close());
+
+  async function runThroughUi(provider: ModelProvider, name: string) {
+    const h = await startRepro(provider, { storeUrl: fromThree.url });
+    const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+    const page = await context.newPage();
+    page.on('pageerror', (error) => assert.fail(`page error: ${error.message}`));
+    await page.goto(`${h.base}/`);
+    await page.getByRole('button', { name: COMPLAINT }).click();
+    await page.getByRole('button', { name: 'Investigate' }).click();
+    const verdict = page.locator('.verdict[data-verdict]');
+    await verdict.waitFor({ timeout: 20_000 });
+    if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, `${name}.png`), fullPage: true });
+    return { h, page, verdict, close: async () => { await context.close(); await h.close(); } };
+  }
+
+  test('a contradicted claim shows the proposed verdict, final verdict and the contradicting observation', async () => {
+    const { page, verdict, close } = await runThroughUi(twoClickNotReproducedDouble(), '6-downgraded');
+    try {
+      assert.equal(await verdict.getAttribute('data-verdict'), 'inconclusive');
+      assert.equal(await page.locator('.verdict .proposed').getAttribute('data-proposed'), 'not_reproduced');
+      const text = await verdict.innerText();
+      assert.match(text, /Model proposed: Not reproduced in this run → final verdict: Inconclusive/);
+      assert.match(text, /Contradicted by its own evidence \(demo cart pricing rule/);
+      assert.match(text, /obs-3 shows Quantity 3 and Unit price \$20\.00, so Total should be \$60\.00, but it shows Total \$40\.00/);
+      assert.match(text, /Covered in this run: Tested quantities: 1, 2, 3\. Clicked button “Increase quantity” twice\./);
+      await page.reload();
+      await page.locator('.verdict[data-verdict="inconclusive"] .proposed').waitFor();
+    } finally {
+      await close();
+    }
+  });
+
+  test('a valid "Not reproduced" shows exactly the quantities it observed', async () => {
+    const { h, page, verdict, close } = await runThroughUi(cartInvestigatorDouble(), '7-not-reproduced-coverage');
+    try {
+      assert.equal(await verdict.getAttribute('data-verdict'), 'not_reproduced');
+      assert.equal(await page.locator('.verdict .proposed').count(), 0, 'no downgrade, so no proposed/final line');
+      const coverage = await page.locator('.verdict .coverage').innerText();
+      assert.match(coverage, /^Covered in this run: Tested quantities: 1, 2\. Clicked button “Increase quantity” once\./);
+      assert.match(coverage, /applies only to the states listed/);
+
+      // A record saved before coverage existed: the server derives it on read
+      // and leaves the file untouched.
+      const runId = /run-[0-9a-f]{8}/.exec(page.url())![0];
+      const file = join(h.runsDir, runId, 'run.json');
+      const legacy = JSON.parse(await readFile(file, 'utf8'));
+      for (const key of ['coverage', 'proposedVerdict', 'downgrade', 'cartPricingCheck']) delete legacy[key];
+      const legacyText = JSON.stringify(legacy, null, 2);
+      await writeFile(file, legacyText);
+      await page.reload();
+      await page.locator('.verdict .coverage').waitFor();
+      assert.match(await page.locator('.verdict .coverage').innerText(), /Tested quantities: 1, 2\. Clicked button “Increase quantity” once\./);
+      assert.equal(await readFile(file, 'utf8'), legacyText, 'the saved record is not rewritten');
+    } finally {
+      await close();
     }
   });
 });

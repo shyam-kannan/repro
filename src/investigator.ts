@@ -15,6 +15,8 @@ import {
   type RecordedObservation,
 } from './browser-session.ts';
 import type { InvestigatorSettings } from './config.ts';
+import { checkCartPricing, CART_PRICING_RULE, describeContradictions, type CartPricingCheck } from './cart-pricing-rule.ts';
+import { describeCoverage, type Coverage } from './coverage.ts';
 import { describeProviderError, isRetryable, type ModelProvider, type ProviderErrorSummary } from './provider.ts';
 import {
   checkCitations,
@@ -23,6 +25,7 @@ import {
   parseReport,
   VERDICT_LABELS,
   type CheckedCitation,
+  type DowngradeRule,
   type SubmittedReport,
   type VerdictCode,
 } from './report.ts';
@@ -119,6 +122,16 @@ export type RunRecord = {
   verdict: (typeof VERDICT_LABELS)[VerdictCode];
   verdictCode: VerdictCode;
   verdictReasons: string[];
+  // The verdict the model proposed in its report (null if none was submitted),
+  // kept beside the final verdict.
+  proposedVerdict: VerdictCode | null;
+  // Set when code changed the proposed verdict, with the rule and reasons.
+  downgrade: { from: VerdictCode; to: VerdictCode; rule: DowngradeRule; reasons: string[] } | null;
+  // The demo-scoped cart pricing check; null when it was not evaluated
+  // (no report, or the verdict was not "Not reproduced").
+  cartPricingCheck: CartPricingCheck | null;
+  // What the run actually covered, from recorded actions and observations.
+  coverage: Coverage;
   endReason: EndReason;
   expectation: {
     supplied: string | null;
@@ -202,6 +215,8 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
   let evidence: CheckedCitation[] = [];
   let verdict: VerdictCode = 'inconclusive';
   let verdictReasons: string[] = [];
+  let downgradeRule: DowngradeRule | undefined;
+  let cartPricingCheck: CartPricingCheck | null = null;
   let endReason: EndReason = 'execution_error';
 
   const emit = (event: InvestigationEvent) => {
@@ -424,7 +439,17 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
     }
 
     evidence = checkCitations(report.evidence, session.observations);
-    ({ verdict, reasons: verdictReasons } = decideVerdict(report, evidence, session.observations, session.actions));
+    ({ verdict, reasons: verdictReasons, rule: downgradeRule } = decideVerdict(report, evidence, session.observations, session.actions));
+    // A "Not reproduced" claim must not contradict the run's own observations
+    // under the demo cart's pricing assumption (see cart-pricing-rule.ts).
+    if (verdict === 'not_reproduced') {
+      cartPricingCheck = checkCartPricing(input.complaint, session.observations);
+      if (cartPricingCheck.applies && cartPricingCheck.contradictions.length > 0) {
+        verdict = 'inconclusive';
+        downgradeRule = CART_PRICING_RULE;
+        verdictReasons = [describeContradictions(cartPricingCheck)];
+      }
+    }
     endReason = 'report_submitted';
   } catch (error) {
     verdict = 'inconclusive';
@@ -460,6 +485,13 @@ export async function investigate(input: InvestigationInput, deps: InvestigatorD
     verdict: VERDICT_LABELS[verdict],
     verdictCode: verdict,
     verdictReasons,
+    proposedVerdict: report?.verdict ?? null,
+    downgrade:
+      report && downgradeRule && verdict !== report.verdict
+        ? { from: report.verdict, to: verdict, rule: downgradeRule, reasons: verdictReasons }
+        : null,
+    cartPricingCheck,
+    coverage: describeCoverage(session.observations, session.actions),
     endReason,
     expectation: {
       supplied: input.expectedBehavior ?? null,

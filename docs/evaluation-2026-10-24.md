@@ -132,11 +132,9 @@ After its first click, every run wrote a short note such as "I'll click once
 more to check that the behavior is consistent". It then stopped after the
 second click, whatever it saw. Depth is a judgment call, not a search.
 
-Through quantity 2 the correct and faulty-from-3 stores look the same to the
-model, so its decision to stop or continue after the first click cannot
-depend on the fixture. Every live cart-complaint run that saw "Quantity 2,
-Total $40.00" after its first click is therefore evidence about that
-decision:
+Every live cart-complaint run that saw "Quantity 2, Total $40.00" after its
+first click shows how far the investigator chooses to go from that point.
+Through quantity 2 the correct and faulty-from-3 stores look the same:
 
 | Source | Runs | Stopped at qty 2 | Continued to qty 3 | Went past qty 3 |
 | --- | --- | --- | --- | --- |
@@ -146,12 +144,22 @@ decision:
 | This follow-up (faulty-from-3 ×3, correct ×1) | 4 | 0 | 4 | 0 |
 | **Total** | **9** | **4** | **5** | **0** |
 
-So in **4 of 9** comparable runs, the investigator would have stopped at
-quantity 2. On the faulty-from-3 store, that means reporting "Not reproduced
-in this run" and missing the bug. No run reached quantity 4, so a bug starting
-there would have been missed in all nine. Nine runs is a small sample, and
-the split is uneven over time (3 of 3 stopped early in one batch, 0 of 4 in
-the next).
+**This is evidence of limited exploration, not a measured miss rate.**
+
+- **What actually happened on the buggy store:** none of the three
+  faulty-from-3 runs missed the bug. All three reached quantity 3 and
+  reported Reproduced.
+- **The four early stops were all on the correct store**, where stopping at
+  quantity 2 was harmless. They show that the investigator sometimes stops
+  after one successful click. They do not show how often it would do so on
+  the faulty-from-3 store, which was tested only three times.
+- **No run went past quantity 3.** Nothing here shows whether the
+  investigator would find a bug that starts later.
+
+The sample is small and uneven over time: all three correct-store runs in one
+batch stopped early, and none of the four runs in the next did. Exploration
+depth should be measured directly on stores where it matters before any rate
+is quoted.
 
 ## A missed bug versus a claim that contradicts its evidence
 
@@ -174,10 +182,60 @@ Neither happened in these four live runs. The offline test
 - A double that clicks twice, cites obs-3 (quantity 3, total $40.00) and
   still claims Not reproduced is flagged as a contradiction.
 
-**That test also shows an implementation gap: Repro's code keeps that
-contradicting verdict.** The evidence rules only confirm that each citation
-matches the page and that some value changed. They never compare the values
-with the claim. The harness flags it, but the investigator does not.
+That test exposed an implementation gap: Repro's code kept the contradicting
+verdict, because its evidence rules only confirmed that each citation matched
+the page and that some value changed. **This has since been fixed** (see
+"Reporting changes" below).
+
+## Reporting changes after this evaluation
+
+The model, prompts and exploration limits are unchanged. Only reporting
+changed, and the four live runs above were not repeated.
+
+**Coverage.** Every run now records what it actually covered, derived from
+its recorded actions and observations, never from the model's description.
+For example: "Tested quantities: 1, 2. Clicked button “Increase quantity”
+once." Only values actually observed are listed; nothing in between is
+implied. The UI shows this beside the verdict, and beside "Not reproduced in
+this run" it adds that the verdict applies only to the states listed. The
+server derives coverage when reading older records and never rewrites them.
+
+**Demo cart pricing rule.** A "Not reproduced" verdict is downgraded to
+Inconclusive when the run's own recorded observations contradict the demo's
+pricing assumption: one line item, no discounts, tax, shipping or fees, so
+Total = Unit price × Quantity. The reason names each contradicting
+observation and its values, e.g. "obs-3 shows Quantity 3 and Unit price
+$20.00, so Total should be $60.00, but it shows Total $40.00". The rule
+checks every recorded observation, not only the cited ones. The record keeps
+the model's proposed verdict (`proposedVerdict`) next to the final verdict,
+along with the downgrade rule and reasons (`downgrade`).
+
+The rule is deliberately narrow (`src/cart-pricing-rule.ts`). It applies only
+when the complaint mentions both the total and the quantity, and every
+observation shows exactly one readable Unit price, Quantity and Total. It
+does not apply if any observation shows a discount, tax, shipping, fee,
+subtotal or similar label. It reads browser observations only, never the
+fixture name or the store's pricing code, and it is not a general rule for
+real stores.
+
+Limited coverage alone never triggers a downgrade. A run that observed only
+quantities 1 and 2, with correct totals, keeps "Not reproduced in this run"
+and states that coverage.
+
+**Checked against the saved live records (read-only):** all 16 live run
+records were re-evaluated in memory without modifying them, confirmed by
+SHA-256 before and after. The rule applied to all six saved "Not reproduced"
+runs (all on the correct store) and found no contradiction in any, so no
+saved verdict would change. The coverage for the four early stops reads
+"Tested quantities: 1, 2. Clicked button “Increase quantity” once."
+Regression tests cover:
+
+- the contradicted report, downgraded with obs-3 named
+- a valid negative that observed only quantities 1 and 2, which is kept
+- an unrelated complaint, where the rule does not apply
+- pages with shipping, tax, discount, subtotal or coupon labels, or several
+  line items, where the rule does not apply
+- the UI display of all of the above, including an older record
 
 ## Harness error during this evaluation (fixed, no runs repeated)
 
