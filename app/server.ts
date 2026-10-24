@@ -3,8 +3,10 @@
 // credentials stay in this process; the browser page only ever sees run data.
 //
 // Files per run, under <runsDir>/<run-id>/:
-//   status.json   lifecycle state (running | finished | failed | interrupted)
-//   events.jsonl  progress events, one JSON object per line, as recorded
+//   status.json      lifecycle state (running | finished | failed | interrupted)
+//   demo-setup.json  the demo scenario chosen for this run, captured when it
+//                    started (presenter metadata; never given to the investigator)
+//   events.jsonl     progress events, one JSON object per line, as recorded
 //   run.json, transcript.json, obs-N.png  written by the investigator
 import { randomBytes } from 'node:crypto';
 import { appendFileSync, writeFileSync } from 'node:fs';
@@ -16,6 +18,9 @@ import type { InvestigatorSettings } from '../src/config.ts';
 import { investigate, type InvestigationEvent, type RunRecord } from '../src/investigator.ts';
 import type { ModelProvider } from '../src/provider.ts';
 import { describeCoverage } from '../src/coverage.ts';
+import { deriveFinding } from '../src/finding.ts';
+import { identifyStore } from '../demo-store/identify.ts';
+import type { Scenario } from './scenarios.ts';
 import type { Browser } from 'playwright';
 
 export const EXAMPLE_COMPLAINTS = ['When I increase the quantity in my cart, the total stays the same.'];
@@ -46,14 +51,30 @@ export type RunStatus = {
   verdictCode?: string;
   endReason?: string;
   error?: string;
+  // The demo scenario label, for the run list. Absent on runs saved before scenarios existed.
+  scenario?: { id: string; label: string };
 };
+
+export type DemoSetup = {
+  scenario: { id: string; label: string; description: string };
+  fixture: string;
+  storeUrl: string;
+  capturedAt: string;
+  storeCheck: string;
+  note: string;
+};
+
+// A running demo store for one scenario.
+export type ScenarioStore = { scenario: Scenario; url: string };
 
 export type ReproServerOptions = {
   // null when REPRO_* configuration is missing; the UI still loads and explains.
   provider: ModelProvider | null;
   configProblems?: string[];
   settings: InvestigatorSettings | null;
-  storeUrl: string;
+  // One store per scenario, each serving a fixed fixture for the server's lifetime.
+  stores: ScenarioStore[];
+  defaultScenario?: string;
   runsDir: string;
   launchBrowser?: () => Promise<Browser>;
   watchdogGraceMs?: number;
@@ -118,10 +139,18 @@ export async function createReproServer(options: ReproServerOptions): Promise<Re
     run.listeners.clear();
   };
 
-  const startRun = (complaint: string, expectedBehavior: string | undefined): RunStatus => {
+  // The scenario is fixed here, when the run starts: the investigation uses this
+  // store's URL, and later selections in the UI only affect the next run.
+  const startRun = (complaint: string, expectedBehavior: string | undefined, store: ScenarioStore): RunStatus => {
     const runId = `run-${randomBytes(4).toString('hex')}`;
     const dir = join(runsDir, runId);
-    const status: RunStatus = { runId, state: 'running', complaint, startedAt: new Date().toISOString() };
+    const status: RunStatus = {
+      runId,
+      state: 'running',
+      complaint,
+      startedAt: new Date().toISOString(),
+      scenario: { id: store.scenario.id, label: store.scenario.label },
+    };
     const run: ActiveRun = { runId, dir, status, events: [], listeners: new Set(), ended: false };
     active = run;
 
@@ -139,8 +168,22 @@ export async function createReproServer(options: ReproServerOptions): Promise<Re
       try {
         await mkdir(dir, { recursive: true });
         writeStatus(dir, status);
+        // Confirm the scenario's store from outside the investigator's browser.
+        const answering = await identifyStore(store.url);
+        if (answering !== store.scenario.fixture) {
+          throw new Error(`the demo store for "${store.scenario.label}" is not serving that scenario`);
+        }
+        const setup: DemoSetup = {
+          scenario: { id: store.scenario.id, label: store.scenario.label, description: store.scenario.description },
+          fixture: store.scenario.fixture,
+          storeUrl: store.url,
+          capturedAt: status.startedAt,
+          storeCheck: `${answering} store confirmed at ${store.url} before the run`,
+          note: 'Chosen by the person running the demo. The investigator was not told; it only received the complaint and the store URL.',
+        };
+        await writeFile(join(dir, 'demo-setup.json'), JSON.stringify(setup, null, 2));
         const record = await investigate(
-          { complaint, expectedBehavior, storeUrl: options.storeUrl },
+          { complaint, expectedBehavior, storeUrl: store.url },
           {
             provider: options.provider!,
             settings: options.settings!,
@@ -205,7 +248,13 @@ export async function createReproServer(options: ReproServerOptions): Promise<Re
           limits: options.settings
             ? { maxBrowserToolCalls: options.settings.maxBrowserToolCalls, deadlineMs: options.settings.deadlineMs }
             : null,
-          storeUrl: options.storeUrl,
+          scenarios: options.stores.map(({ scenario, url }) => ({
+            id: scenario.id,
+            label: scenario.label,
+            description: scenario.description,
+            storeUrl: url,
+          })),
+          defaultScenario: options.defaultScenario ?? options.stores[0]?.scenario.id ?? null,
           activeRunId: active?.runId ?? null,
           examples: EXAMPLE_COMPLAINTS,
         });
@@ -245,7 +294,9 @@ export async function createReproServer(options: ReproServerOptions): Promise<Re
             activeRunId: active.runId,
           });
         }
-        const status = startRun(complaint, expected);
+        const store = options.stores.find((s) => s.scenario.id === body.value.scenario);
+        if (!store) return sendJson(res, 400, { error: 'Choose a demo scenario.' });
+        const status = startRun(complaint, expected, store);
         return sendJson(res, 202, status);
       }
 
@@ -274,7 +325,15 @@ export async function createReproServer(options: ReproServerOptions): Promise<Re
     if (!status) return sendJson(res, 404, { error: 'Run not found.' });
     const events = active?.runId === runId ? active.events : await readEvents(dir);
     const record = await readJson<RunRecord>(join(dir, 'run.json'));
-    sendJson(res, 200, { status, events, record: record ? publicRecord(record) : null });
+    const setup = await readJson<DemoSetup>(join(dir, 'demo-setup.json'));
+    sendJson(res, 200, {
+      status,
+      events,
+      setup,
+      record: record ? publicRecord(record) : null,
+      // Derived from the saved observations each time the report is read.
+      finding: record ? deriveFinding(record.input.complaint, record.observations) : null,
+    });
   };
 
   // Server-sent events: replays what was already recorded, then streams live

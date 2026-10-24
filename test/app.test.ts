@@ -11,6 +11,7 @@ import { after, before, describe, test } from 'node:test';
 import Anthropic from '@anthropic-ai/sdk';
 import { chromium, type Browser, type Page } from 'playwright';
 import { createReproServer, type ReproServer } from '../app/server.ts';
+import { SCENARIOS, type Scenario } from '../app/scenarios.ts';
 import type { ModelProvider } from '../src/provider.ts';
 import {
   cartInvestigatorDouble,
@@ -26,15 +27,18 @@ const COMPLAINT = 'When I increase the quantity in my cart, the total stays the 
 // Screenshots of the UI for manual review; outside the repository.
 const SHOT_DIR = process.env.REPRO_UI_SHOT_DIR;
 
-let store: { url: string; close: () => void };
+// One store per demo scenario, shared by every test server.
+let stores: { scenario: Scenario; url: string; close: () => void }[];
 let browser: Browser;
+// Most tests use this scenario (the "faulty" fixture).
+const DEFAULT_SCENARIO = 'total-never-updates';
 
 before(async () => {
-  store = await startStore('faulty');
+  stores = await Promise.all(SCENARIOS.map(async (scenario) => ({ scenario, ...(await startStore(scenario.fixture)) })));
   browser = await chromium.launch();
 });
 after(async () => {
-  store.close();
+  for (const s of stores) s.close();
   await browser.close();
 });
 
@@ -42,14 +46,15 @@ type Harness = { base: string; repro: ReproServer; runsDir: string; close: () =>
 
 async function startRepro(
   provider: ModelProvider | null,
-  options: { runsDir?: string; deadlineMs?: number; watchdogGraceMs?: number; storeUrl?: string } = {},
+  options: { runsDir?: string; deadlineMs?: number; watchdogGraceMs?: number; defaultScenario?: string } = {},
 ): Promise<Harness> {
   const runsDir = options.runsDir ?? (await tempRunsDir());
   const repro = await createReproServer({
     provider,
     configProblems: provider ? [] : ['REPRO_ANTHROPIC_API_KEY is not set'],
     settings: provider ? testSettings(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}) : null,
-    storeUrl: options.storeUrl ?? store.url,
+    stores: stores.map(({ scenario, url }) => ({ scenario, url })),
+    defaultScenario: options.defaultScenario ?? DEFAULT_SCENARIO,
     runsDir,
     watchdogGraceMs: options.watchdogGraceMs,
   });
@@ -68,11 +73,11 @@ async function startRepro(
   };
 }
 
-const post = (base: string, body: unknown, headers: Record<string, string> = {}) =>
+const post = (base: string, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
   fetch(`${base}/api/runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: base, ...headers },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ scenario: DEFAULT_SCENARIO, ...body }),
   });
 
 async function waitForState(base: string, runId: string, timeoutMs = 20_000) {
@@ -315,8 +320,11 @@ describe('browser flow (test double)', () => {
     const page = await newPage();
     try {
       await page.goto(`${h.base}/`);
+      await page.getByText('Repro takes a bug report written in plain English').waitFor();
+      assert.equal(await page.locator('label.scenario').count(), 3);
+      assert.equal(await page.getByRole('radio', { name: /^Total never updates/ }).isChecked(), true, 'server default is preselected');
       await page.getByRole('button', { name: COMPLAINT }).click();
-      assert.equal(await page.getByLabel('Complaint').inputValue(), COMPLAINT);
+      assert.equal(await page.getByLabel('Bug report').inputValue(), COMPLAINT);
       await shoot(page, '1-home');
       await page.getByRole('button', { name: 'Investigate' }).click();
 
@@ -332,11 +340,36 @@ describe('browser flow (test double)', () => {
       assert.equal(await verdict.getAttribute('data-verdict'), 'reproduced');
       assert.match(await verdict.innerText(), /Reproduced/);
       await page.getByText('This run used a scripted test double, not a real model').waitFor();
-      await page.getByText('Expected behavior · inferred by the model').waitFor();
+
+      // Summary at the top: verdict, the finding from recorded evidence, coverage.
+      assert.equal(
+        await page.locator('.verdict .finding').innerText(),
+        'What the browser showed: Quantity changed from 1 to 2, but Total stayed at $20.00 instead of reaching $40.00.\n' +
+          '$40.00 is inferred, not stated in the report: Unit price $20.00 × Quantity 2, assuming one item and no discounts, tax or shipping.',
+      );
+      assert.match(await page.locator('.verdict .coverage').innerText(), /Tested quantities: 1, 2\. Clicked button “Increase quantity” once\./);
+      const order = await page.evaluate(() =>
+        [...document.querySelectorAll('#app > section, #app > details')].map((el) => (el as HTMLElement).dataset.section ?? el.className),
+      );
+      assert.deepEqual(order, ['verdict reproduced', 'report', 'evidence', 'steps', 'model', 'citations', 'run-details', 'activity']);
+      assert.match(await page.locator('[data-section="report"] .demo-setup').innerText(), /^Demo scenario: Total never updates/);
+
+      // Secondary material is collapsed until opened.
+      for (const section of ['model', 'citations', 'run-details', 'activity']) {
+        assert.equal(await page.locator(`details[data-section="${section}"]`).getAttribute('open'), null, section);
+      }
+      assert.equal(await page.getByText('The total should equal unit price times quantity.').isVisible(), false);
+      await page.locator('details[data-section="model"] > summary').click();
+      await page.getByText('Expected behavior · inferred by the model (not stated in the report)').waitFor();
       await page.getByText('The total should equal unit price times quantity.').waitFor();
 
+      // Readable step labels, with observation IDs kept alongside.
       const headers = await page.locator('table.obs thead th').allInnerTexts();
-      assert.deepEqual(headers.map((t) => t.split('\n')[0]), ['Label', 'obs-1', 'obs-2']);
+      assert.deepEqual(headers.map((t) => t.split('\n')), [['Value'], ['Page opened', 'obs-1'], ['After the first increase', 'obs-2']]);
+      assert.deepEqual(
+        await page.locator('figure.shot .shot-title').allInnerTexts(),
+        ['Before: Page opened', 'After: After the first increase'],
+      );
       const totalRow = await page.locator('table.obs tbody tr', { hasText: 'Total' }).locator('td').allInnerTexts();
       assert.deepEqual(totalRow.map((t) => t.split(/\s*cited/)[0].trim()), ['$20.00', '$20.00']);
       assert.equal(await page.locator('table.obs tbody tr', { hasText: 'Quantity' }).locator('td.changed').count(), 1);
@@ -397,7 +430,7 @@ describe('browser flow (test double)', () => {
     try {
       const hostile = '<img src=x onerror="window.__pwned=1"> total wrong';
       await page.goto(`${h.base}/`);
-      await page.getByLabel('Complaint').fill(hostile);
+      await page.getByLabel('Bug report').fill(hostile);
       await page.getByRole('button', { name: 'Investigate' }).click();
       const verdict = page.locator('.verdict[data-verdict]');
       await verdict.waitFor({ timeout: 20_000 });
@@ -448,14 +481,8 @@ describe('browser flow (test double)', () => {
 });
 
 describe('coverage and downgrade display (test double)', () => {
-  let fromThree: { url: string; close: () => void };
-  before(async () => {
-    fromThree = await startStore('faulty-from-3');
-  });
-  after(() => fromThree.close());
-
   async function runThroughUi(provider: ModelProvider, name: string) {
-    const h = await startRepro(provider, { storeUrl: fromThree.url });
+    const h = await startRepro(provider, { defaultScenario: 'total-stops-after-first' });
     const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
     const page = await context.newPage();
     page.on('pageerror', (error) => assert.fail(`page error: ${error.message}`));
@@ -478,6 +505,21 @@ describe('coverage and downgrade display (test double)', () => {
       assert.match(text, /Contradicted by its own evidence \(demo cart pricing rule/);
       assert.match(text, /obs-3 shows Quantity 3 and Unit price \$20\.00, so Total should be \$60\.00, but it shows Total \$40\.00/);
       assert.match(text, /Covered in this run: Tested quantities: 1, 2, 3\. Clicked button “Increase quantity” twice\./);
+      assert.match(
+        await page.locator('.verdict .finding').innerText(),
+        /^What the browser showed: Quantity changed from 2 to 3, but Total stayed at \$40\.00 instead of reaching \$60\.00\.\n\$60\.00 is inferred, not stated in the report/,
+      );
+      // The comparison opens on the steps just before and after the problem.
+      assert.equal(await page.locator('#cmp-before').inputValue(), 'obs-2');
+      assert.equal(await page.locator('#cmp-after').inputValue(), 'obs-3');
+      assert.deepEqual(await page.locator('figure.shot .shot-title').allInnerTexts(), [
+        'Before: After the first increase',
+        'After: After the second increase',
+      ]);
+      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed').allInnerTexts(), ['3']);
+      // Other steps stay selectable.
+      await page.locator('#cmp-before').selectOption('obs-1');
+      assert.deepEqual(await page.locator('figure.shot .shot-title').allInnerTexts(), ['Before: Page opened', 'After: After the second increase']);
       await page.reload();
       await page.locator('.verdict[data-verdict="inconclusive"] .proposed').waitFor();
     } finally {
@@ -508,6 +550,136 @@ describe('coverage and downgrade display (test double)', () => {
       assert.equal(await readFile(file, 'utf8'), legacyText, 'the saved record is not rewritten');
     } finally {
       await close();
+    }
+  });
+});
+
+describe('demo scenarios', () => {
+  // Strings the investigator must never see: scenario ids, labels and
+  // descriptions, and fixture names.
+  const forbidden = SCENARIOS.flatMap((s) => [s.id, s.label, s.description, s.fixture]);
+  const leaks = (text: string) => forbidden.filter((f) => text.includes(f));
+
+  test('the scenario is captured at start, saved as demo setup, and kept from the investigator', async () => {
+    const provider = cartInvestigatorDouble();
+    const h = await startRepro(provider);
+    try {
+      const unknown = await post(h.base, { complaint: COMPLAINT, scenario: 'no-such-scenario' });
+      assert.equal(unknown.status, 400);
+
+      const { runId, scenario } = await (await post(h.base, { complaint: COMPLAINT, scenario: 'total-stops-after-first' })).json();
+      assert.deepEqual(scenario, { id: 'total-stops-after-first', label: 'Total stops updating after the first increase' });
+      const data = await waitForState(h.base, runId);
+      const fromThree = stores.find((s) => s.scenario.id === 'total-stops-after-first')!;
+      assert.equal(data.record.input.storeOrigin, new URL(fromThree.url).origin, 'the run used the chosen scenario’s store');
+      assert.equal(data.setup.scenario.id, 'total-stops-after-first');
+      assert.equal(data.setup.fixture, 'faulty-from-3');
+      assert.match(data.setup.storeCheck, /^faulty-from-3 store confirmed at http:\/\/127\.0\.0\.1:\d+\/ before the run$/);
+      const saved = JSON.parse(await readFile(join(h.runsDir, runId, 'demo-setup.json'), 'utf8'));
+      assert.deepEqual(saved, data.setup);
+
+      // Nothing the investigator saw or produced mentions the scenario.
+      assert.deepEqual(leaks(JSON.stringify(provider.requests)), [], 'model requests');
+      for (const file of ['run.json', 'transcript.json', 'events.jsonl']) {
+        assert.deepEqual(leaks(await readFile(join(h.runsDir, runId, file), 'utf8')), [], file);
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('a scenario chosen for the next run does not change the active one', async () => {
+    const { provider, release } = gatedDouble();
+    const h = await startRepro(provider);
+    try {
+      const first = await (await post(h.base, { complaint: COMPLAINT, scenario: 'working-cart' })).json();
+      const second = await post(h.base, { complaint: COMPLAINT, scenario: 'total-never-updates' });
+      assert.equal(second.status, 409);
+      release();
+      const done = await waitForState(h.base, first.runId);
+      assert.equal(done.setup.scenario.id, 'working-cart');
+      assert.equal(done.record.verdictCode, 'not_reproduced', 'the working cart was investigated');
+      await h.repro.idle();
+      const next = await (await post(h.base, { complaint: COMPLAINT, scenario: 'total-never-updates' })).json();
+      const nextDone = await waitForState(h.base, next.runId);
+      assert.equal(nextDone.setup.scenario.id, 'total-never-updates');
+      const again = await (await fetch(`${h.base}/api/runs/${first.runId}`)).json();
+      assert.equal(again.setup.scenario.id, 'working-cart', 'the earlier report keeps its original setup');
+    } finally {
+      release();
+      await h.close();
+    }
+  });
+
+  test('a store that does not serve the chosen scenario stops the run before any model call', async () => {
+    const provider = cartInvestigatorDouble();
+    const correct = stores.find((s) => s.scenario.fixture === 'correct')!;
+    const runsDir = await tempRunsDir();
+    const repro = await createReproServer({
+      provider,
+      settings: testSettings(),
+      // Misconfigured on purpose: this scenario points at the working store.
+      stores: [{ scenario: SCENARIOS.find((s) => s.id === 'total-never-updates')!, url: correct.url }],
+      runsDir,
+    });
+    repro.server.listen(0, '127.0.0.1');
+    await once(repro.server, 'listening');
+    const base = `http://127.0.0.1:${(repro.server.address() as AddressInfo).port}`;
+    try {
+      const { runId } = await (await post(base, { complaint: COMPLAINT })).json();
+      const data = await waitForState(base, runId);
+      assert.equal(data.status.state, 'failed');
+      assert.match(data.status.error, /the demo store for "Total never updates" is not serving that scenario/);
+      assert.equal(provider.requests.length, 0);
+      assert.equal(data.record, null);
+    } finally {
+      await repro.idle();
+      repro.server.close();
+      repro.server.closeAllConnections();
+    }
+  });
+
+  test('the UI sends the selected scenario; older reports without demo setup still open', async () => {
+    const h = await startRepro(cartInvestigatorDouble());
+    const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+    page.on('pageerror', (error) => assert.fail(`page error: ${error.message}`));
+    try {
+      await page.goto(`${h.base}/`);
+      await page.getByRole('radio', { name: /^Working cart/ }).check();
+      await page.getByRole('button', { name: COMPLAINT }).click();
+      await page.getByRole('button', { name: 'Investigate' }).click();
+      await page.locator('.verdict[data-verdict]').waitFor({ timeout: 20_000 });
+      assert.equal(await page.locator('.verdict').getAttribute('data-verdict'), 'not_reproduced');
+      assert.equal(await page.locator('.demo-setup').getAttribute('data-scenario'), 'working-cart');
+      assert.match(
+        await page.locator('.verdict .finding').innerText(),
+        /^What the browser showed: Every observed total matched unit price × quantity: Quantity 1 → 2, Total \$20\.00 → \$40\.00\./,
+      );
+      const runUrl = page.url();
+
+      // The choice is remembered for the next run, without affecting this report.
+      await page.goto(`${h.base}/`);
+      assert.equal(await page.getByRole('radio', { name: /^Working cart/ }).isChecked(), true);
+      await page.getByRole('radio', { name: /^Total never updates/ }).check();
+      await page.goto(runUrl);
+      await page.locator('.verdict[data-verdict]').waitFor();
+      assert.equal(await page.locator('.demo-setup').getAttribute('data-scenario'), 'working-cart');
+
+      // A report saved before scenarios existed: no demo-setup.json, no scenario in status.
+      const runId = /run-[0-9a-f]{8}/.exec(runUrl)![0];
+      const dir = join(h.runsDir, runId);
+      const { rm } = await import('node:fs/promises');
+      await rm(join(dir, 'demo-setup.json'));
+      const status = JSON.parse(await readFile(join(dir, 'status.json'), 'utf8'));
+      delete status.scenario;
+      await writeFile(join(dir, 'status.json'), JSON.stringify(status));
+      await page.reload();
+      await page.locator('.verdict[data-verdict="not_reproduced"]').waitFor();
+      assert.match(await page.locator('.demo-setup').innerText(), /Demo scenario: not recorded/);
+      assert.match(await page.locator('.verdict .finding').innerText(), /Every observed total matched/);
+    } finally {
+      await page.close();
+      await h.close();
     }
   });
 });

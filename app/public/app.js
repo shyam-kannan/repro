@@ -139,6 +139,49 @@ async function showHome() {
   const blocked = !status.configured || status.activeRunId;
   submit.disabled = Boolean(blocked);
 
+  // The selected scenario is remembered in this browser only, as a convenience.
+  const remembered = (() => {
+    try {
+      return localStorage.getItem('repro.scenario');
+    } catch {
+      return null;
+    }
+  })();
+  const selected = status.scenarios.some((s) => s.id === remembered) ? remembered : status.defaultScenario;
+  const scenarioChoices = h(
+    'fieldset',
+    { class: 'scenarios' },
+    h('legend', {}, 'Demo scenario'),
+    h('p', { class: 'small muted' }, 'Choose how the demo store behaves for the next investigation. Repro’s investigator is not told which one you picked; it has to find out in the browser.'),
+    status.scenarios.map((scenario) =>
+      h(
+        'label',
+        { class: 'scenario' },
+        h('input', {
+          type: 'radio',
+          name: 'scenario',
+          value: scenario.id,
+          checked: scenario.id === selected,
+          onchange: () => {
+            try {
+              localStorage.setItem('repro.scenario', scenario.id);
+            } catch {
+              // storage unavailable: the choice still applies to this form
+            }
+          },
+        }),
+        h(
+          'span',
+          { class: 'scenario-text' },
+          h('span', { class: 'scenario-label' }, scenario.label),
+          h('span', { class: 'scenario-description' }, scenario.description),
+          h('a', { href: scenario.storeUrl, target: '_blank', rel: 'noopener', class: 'small' }, 'Try this store yourself'),
+        ),
+      ),
+    ),
+  );
+  const selectedScenario = () => scenarioChoices.querySelector('input[name="scenario"]:checked')?.value;
+
   const form = h(
     'form',
     {
@@ -152,7 +195,7 @@ async function showHome() {
           const run = await api('/api/runs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ complaint: complaint.value, expectedBehavior: expected.value }),
+            body: JSON.stringify({ complaint: complaint.value, expectedBehavior: expected.value, scenario: selectedScenario() }),
           });
           navigate(`/runs/${run.runId}`);
         } catch (error) {
@@ -166,7 +209,8 @@ async function showHome() {
       },
     },
     h('h1', {}, 'New investigation'),
-    h('label', { for: 'complaint' }, 'Complaint'),
+    scenarioChoices,
+    h('label', { for: 'complaint' }, 'Bug report'),
     complaint,
     h(
       'div',
@@ -190,9 +234,9 @@ async function showHome() {
       h(
         'span',
         { class: 'muted small' },
-        'Target: ',
-        h('a', { href: status.storeUrl, target: '_blank', rel: 'noopener' }, status.storeUrl),
-        status.limits ? ` · fresh Chromium · up to ${status.limits.maxBrowserToolCalls} browser tool calls · ${status.limits.deadlineMs / 1000} s` : '',
+        status.limits
+          ? `Runs in a fresh Chromium browser · up to ${status.limits.maxBrowserToolCalls} browser actions · ${status.limits.deadlineMs / 1000} s`
+          : '',
       ),
     ),
     h('p', { class: 'small' }, formError),
@@ -227,7 +271,7 @@ async function showHome() {
               'a',
               { href: `/runs/${run.runId}`, 'data-nav': true },
               statePill(run),
-              h('span', { class: 'run-complaint' }, run.complaint),
+              h('span', { class: 'run-complaint' }, run.complaint, run.scenario ? h('span', { class: 'muted small' }, ` · ${run.scenario.label}`) : null),
               h('span', { class: 'muted small' }, fmtTime(run.startedAt)),
             ),
           ),
@@ -235,7 +279,24 @@ async function showHome() {
       )
     : h('p', { class: 'muted' }, 'No investigations yet.');
 
-  setView(notices, form, h('section', { class: 'card' }, h('h2', {}, 'Recent runs'), list));
+  const intro = h(
+    'section',
+    { class: 'card intro' },
+    h('h1', {}, 'What Repro does'),
+    h(
+      'p',
+      {},
+      'Repro takes a bug report written in plain English, tries to reproduce it in a demo store using a real browser, and saves the browser evidence: a screenshot and the values on the page after every step.',
+    ),
+    h(
+      'ol',
+      { class: 'how' },
+      h('li', {}, 'Pick how the demo store should behave.'),
+      h('li', {}, 'Enter a bug report, or use the example.'),
+      h('li', {}, 'An AI investigator clicks through the store, then reports Reproduced, Not reproduced in this run, or Inconclusive. Repro checks its claims against what the browser recorded.'),
+    ),
+  );
+  setView(notices, intro, form, h('section', { class: 'card' }, h('h2', {}, 'Recent runs'), list));
   if (!blocked) complaint.focus();
 }
 
@@ -265,12 +326,22 @@ function backLink() {
   return h('p', {}, h('a', { href: '/', 'data-nav': true }, '← New investigation'));
 }
 
-function runHeader(runId, runStatus) {
+function runHeader(runId, runStatus, setup) {
+  const scenario = setup?.scenario ?? runStatus.scenario;
   return h(
     'section',
-    { class: 'card' },
-    h('div', { class: 'run-head' }, h('h1', {}, 'Complaint'), h('span', { class: 'muted small mono' }, `${runId} · started ${fmtTime(runStatus.startedAt)}`)),
+    { class: 'card', 'data-section': 'report' },
+    h('div', { class: 'run-head' }, h('h2', {}, 'Bug report'), h('span', { class: 'muted small mono' }, `${runId} · started ${fmtTime(runStatus.startedAt)}`)),
     h('blockquote', { class: 'complaint' }, runStatus.complaint),
+    h(
+      'p',
+      { class: 'small demo-setup', 'data-scenario': scenario?.id ?? '' },
+      h('strong', {}, 'Demo scenario: '),
+      scenario
+        ? [scenario.label, scenario.description ? h('span', { class: 'muted' }, ` — ${scenario.description}`) : null]
+        : h('span', { class: 'muted' }, 'not recorded (this run was made before scenario selection existed).'),
+      scenario ? h('div', { class: 'muted' }, 'Chosen by the person running the demo when the run started. The investigator was not told.') : null,
+    ),
   );
 }
 
@@ -435,16 +506,16 @@ function addActivity(list, runId, startIso, event) {
 }
 
 function renderFinished(runId, data) {
-  const { status: runStatus, record, events } = data;
+  const { status: runStatus, record, events, setup, finding } = data;
   const activity = h('ol', { class: 'activity' });
   for (const event of events) addActivity(activity, runId, runStatus.startedAt, event);
-  const log = h('details', { class: 'card log' }, h('summary', {}, `Activity log (${events.length} recorded events)`), activity);
+  const log = h('details', { class: 'card log', 'data-section': 'activity' }, h('summary', {}, `Activity log (${events.length} recorded events)`), activity);
 
   if (!record) {
     const label = runStatus.state === 'interrupted' ? 'Interrupted' : 'Failed';
     setView(
       backLink(),
-      runHeader(runId, runStatus),
+      runHeader(runId, runStatus, setup),
       h(
         'section',
         { class: `verdict ${runStatus.state}` },
@@ -458,16 +529,18 @@ function renderFinished(runId, data) {
     return;
   }
 
+  const labels = stepLabels(record);
   setView(
     backLink(),
     record.provider.startsWith('TEST DOUBLE')
       ? h('div', { class: 'banner-double' }, `This run used a scripted test double, not a real model (${record.provider}). It verifies the UI and pipeline only.`)
       : null,
-    runHeader(runId, runStatus),
-    verdictPanel(record, runStatus),
-    h('div', { class: 'grid-2' }, expectationCard(record), modelAccountCard(record)),
-    comparisonCard(runId, record),
-    actionsCard(record),
+    summaryPanel(record, runStatus, finding),
+    runHeader(runId, runStatus, setup),
+    comparisonCard(runId, record, finding, labels),
+    actionsCard(record, labels),
+    modelCard(record),
+    citationsCard(record, labels),
     detailsCard(record),
     log,
   );
@@ -482,7 +555,33 @@ const DOWNGRADE_TEXT = {
     'Contradicted by its own evidence (demo cart pricing rule: Total = Unit price × Quantity, one item, no discounts, tax or shipping).',
 };
 
-function verdictPanel(record, runStatus) {
+const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+const ordinal = (n) => ORDINALS[n - 1] ?? `${n}th`;
+
+// Readable names for each observation, from the action that produced it:
+// "Page opened", "After the first increase", "After the second increase", ...
+function stepLabels(record) {
+  const labels = new Map();
+  const clicksByTarget = new Map();
+  for (const o of record.observations) {
+    const action = record.actions.find((a) => a.id === o.trigger);
+    if (!action) {
+      labels.set(o.id, o.trigger === 'observe_page' ? 'Page checked again' : `After ${o.trigger}`);
+    } else if (action.kind === 'open') {
+      labels.set(o.id, 'Page opened');
+    } else {
+      const name = action.target?.name ?? '';
+      const n = (clicksByTarget.get(name) ?? 0) + 1;
+      clicksByTarget.set(name, n);
+      const increase = /^Increase\b/i.test(name);
+      labels.set(o.id, increase ? `After the ${ordinal(n)} increase` : `After clicking “${name}” (${ordinal(n)} time)`);
+    }
+  }
+  return { of: (id) => labels.get(id) ?? id };
+}
+
+// The top of the report: verdict, what the evidence shows, and what was covered.
+function summaryPanel(record, runStatus, finding) {
   const reasons = [];
   const endText = END_REASON_TEXT[record.endReason];
   if (endText) reasons.push(endText);
@@ -492,6 +591,7 @@ function verdictPanel(record, runStatus) {
   if (downgrade) reasons.push(DOWNGRADE_TEXT[downgrade.rule] ?? `Downgraded by rule ${downgrade.rule}.`);
   else if (legacyDowngrade) reasons.push('Repro downgraded the model’s proposed verdict.');
   const proposed = downgrade?.from ?? (legacyDowngrade ? record.proposedVerdict : null);
+  const allReasons = [...reasons, ...record.verdictReasons];
   return h(
     'section',
     { class: `verdict ${record.verdictCode}`, 'data-verdict': record.verdictCode },
@@ -500,88 +600,82 @@ function verdictPanel(record, runStatus) {
     proposed
       ? h('div', { class: 'proposed', 'data-proposed': proposed }, 'Model proposed: ', h('strong', {}, VERDICT_LABEL[proposed] ?? proposed), ' → final verdict: ', h('strong', {}, record.verdict))
       : null,
-    h('div', {}, VERDICT_TEXT[record.verdictCode]),
-    reasons.length || record.verdictReasons.length ? h('ul', {}, [...reasons, ...record.verdictReasons].map((r) => h('li', {}, r))) : null,
-    record.coverage
-      ? h(
-          'div',
-          { class: 'coverage', 'data-coverage': true },
-          h('span', { class: 'coverage-label' }, 'Covered in this run: '),
-          record.coverage.summary,
-          record.verdictCode === 'not_reproduced'
-            ? h('div', { class: 'small' }, 'This verdict applies only to the states listed. Values that were never observed were not tested.')
-            : null,
-        )
-      : null,
+    allReasons.length ? h('ul', { class: 'reasons' }, allReasons.map((r) => h('li', {}, r))) : null,
+    h(
+      'div',
+      { class: 'summary-box' },
+      finding
+        ? h(
+            'div',
+            { class: 'finding', 'data-finding': finding.kind },
+            h('span', { class: 'summary-label' }, 'What the browser showed: '),
+            finding.text,
+            finding.inferredExpectation ? h('div', { class: 'small muted-strong' }, finding.inferredExpectation) : null,
+          )
+        : null,
+      record.coverage
+        ? h(
+            'div',
+            { class: 'coverage', 'data-coverage': true },
+            h('span', { class: 'summary-label' }, 'Covered in this run: '),
+            record.coverage.summary,
+            record.verdictCode === 'not_reproduced'
+              ? h('div', { class: 'small muted-strong' }, 'This verdict applies only to the states listed. Values that were never observed were not tested.')
+              : null,
+          )
+        : null,
+    ),
+    h('div', { class: 'small verdict-note' }, VERDICT_TEXT[record.verdictCode]),
     runStatus.state === 'interrupted' ? h('p', {}, runStatus.error) : null,
   );
 }
 
-function expectationCard(record) {
-  const { expectation } = record;
-  return h(
-    'section',
-    { class: 'card' },
-    h('h2', {}, 'What was tested'),
-    h('div', { class: 'source-tag' }, expectation.supplied ? 'Expected behavior · supplied by you' : 'Expected behavior · inferred by the model'),
-    h('p', { class: expectation.supplied || expectation.testedAgainst ? 'prose' : 'muted' }, expectation.supplied ?? expectation.testedAgainst ?? 'Not recorded: no report was submitted.'),
-    expectation.supplied && expectation.testedAgainst && expectation.testedAgainst !== expectation.supplied
-      ? [h('div', { class: 'source-tag' }, 'Model tested against'), h('p', { class: 'prose' }, expectation.testedAgainst)]
-      : null,
-    h('div', { class: 'source-tag' }, 'Assumptions the model made'),
-    expectation.modelAssumptions.length
-      ? h('ul', { class: 'plain' }, expectation.modelAssumptions.map((a) => h('li', {}, a)))
-      : h('p', { class: 'muted' }, 'None listed.'),
-  );
-}
-
-function modelAccountCard(record) {
-  const report = record.modelReport;
-  if (!report) {
-    return h('section', { class: 'card' }, h('h2', {}, "Model's account"), h('p', { class: 'muted' }, 'No report was submitted.'));
-  }
-  return h(
-    'section',
-    { class: 'card' },
-    h('h2', {}, "Model's account"),
-    h('div', { class: 'source-tag' }, 'Observed behavior (as stated by the model)'),
-    h('p', { class: 'prose' }, report.observed_behavior),
-    h('div', { class: 'source-tag' }, 'Explanation (as stated by the model)'),
-    h('p', { class: 'prose' }, report.explanation),
-    report.inconclusive_reason ? [h('div', { class: 'source-tag' }, 'Why inconclusive'), h('p', { class: 'prose' }, report.inconclusive_reason)] : null,
-    h('div', { class: 'source-tag' }, `Cited evidence · checked by Repro (${record.evidence.filter((c) => c.ok).length}/${record.evidence.length} match)`),
-    h(
-      'ul',
-      { class: 'citations' },
-      record.evidence.map((c) =>
-        h(
-          'li',
-          {},
-          h('span', { class: c.ok ? 'status-ok' : 'status-bad' }, c.ok ? '✓ matches ' : '✗ mismatch '),
-          h('a', { href: `#${c.observation_id}` }, c.observation_id),
-          ' ',
-          h('span', { class: 'mono' }, `${c.label}: ${c.value}`),
-          c.problem ? h('div', { class: 'small status-bad' }, c.problem) : null,
-        ),
-      ),
-    ),
-  );
-}
-
-function comparisonCard(runId, record) {
+function comparisonCard(runId, record, finding, labels) {
   const observations = record.observations;
   if (!observations.length) {
-    return h('section', { class: 'card' }, h('h2', {}, 'Before and after'), h('p', { class: 'muted' }, 'No observations were recorded.'));
+    return h('section', { class: 'card' }, h('h2', {}, 'Evidence'), h('p', { class: 'muted' }, 'No observations were recorded.'));
   }
-  const labels = [...new Set(observations.flatMap((o) => o.fields.map((f) => f.label)))];
+  const fieldLabels = [...new Set(observations.flatMap((o) => o.fields.map((f) => f.label)))];
   const valueOf = (o, label) => o.fields.find((f) => f.label === label)?.value;
   const citation = (o, label) => record.evidence.find((c) => c.observation_id === o.id && c.label === label);
-  const actionFor = (o) => record.actions.find((a) => a.id === o.trigger);
-  const caption = (o) => {
-    const a = actionFor(o);
-    if (!a) return `after ${o.trigger}`;
-    return a.kind === 'open' ? 'after opening the page' : `after clicking “${a.target?.name ?? ''}”`;
+
+  // Default pair: the observations just before and after the problem the
+  // evidence shows; otherwise the first and last observation.
+  const pairFromFinding = finding && finding.before && finding.after && finding.before !== finding.after;
+  const defaultBefore = pairFromFinding ? finding.before : observations[0].id;
+  const defaultAfter = pairFromFinding ? finding.after : observations.at(-1).id;
+
+  const options = (selected) =>
+    observations.map((o) => h('option', { value: o.id, selected: o.id === selected }, `${labels.of(o.id)} (${o.id})`));
+  const beforeSelect = h('select', { id: 'cmp-before' }, options(defaultBefore));
+  const afterSelect = h('select', { id: 'cmp-after' }, options(defaultAfter));
+  const pair = h('div', { class: 'grid-2' });
+  const figure = (o, other, role) =>
+    h(
+      'figure',
+      { class: 'shot', 'data-role': role, 'data-observation': o.id },
+      h('figcaption', { class: 'shot-title' }, h('strong', {}, `${role}: ${labels.of(o.id)}`)),
+      h('a', { href: shotUrl(runId, o.screenshot), target: '_blank', rel: 'noopener' }, h('img', { src: shotUrl(runId, o.screenshot), alt: `${role}: ${labels.of(o.id)}` })),
+      h(
+        'dl',
+        {},
+        o.fields.map((f) => [h('dt', {}, f.label), h('dd', { class: role === 'After' && valueOf(other, f.label) !== f.value ? 'changed' : null }, f.value)]),
+      ),
+      h(
+        'div',
+        { class: 'small muted' },
+        `Observation ${o.id} · `,
+        h('a', { href: shotUrl(runId, o.screenshot), target: '_blank', rel: 'noopener' }, 'Open full screenshot'),
+      ),
+    );
+  const renderPair = () => {
+    const b = observations.find((o) => o.id === beforeSelect.value);
+    const a = observations.find((o) => o.id === afterSelect.value);
+    pair.replaceChildren(figure(b, a, 'Before'), figure(a, b, 'After'));
   };
+  beforeSelect.addEventListener('change', renderPair);
+  afterSelect.addEventListener('change', renderPair);
+  renderPair();
 
   const table = h(
     'table',
@@ -592,22 +686,14 @@ function comparisonCard(runId, record) {
       h(
         'tr',
         {},
-        h('th', { scope: 'col' }, 'Label'),
-        observations.map((o) =>
-          h(
-            'th',
-            { scope: 'col', id: o.id },
-            h('div', {}, o.id),
-            h('div', { class: 'small muted' }, caption(o)),
-            h('a', { href: shotUrl(runId, o.screenshot), target: '_blank', rel: 'noopener', title: `Open ${o.screenshot}` }, h('img', { src: shotUrl(runId, o.screenshot), alt: `Screenshot ${o.id}`, loading: 'lazy' })),
-          ),
-        ),
+        h('th', { scope: 'col' }, 'Value'),
+        observations.map((o) => h('th', { scope: 'col', id: o.id }, h('div', {}, labels.of(o.id)), h('div', { class: 'small muted' }, o.id))),
       ),
     ),
     h(
       'tbody',
       {},
-      labels.map((label) =>
+      fieldLabels.map((label) =>
         h(
           'tr',
           {},
@@ -628,55 +714,35 @@ function comparisonCard(runId, record) {
     ),
   );
 
-  // Side-by-side screenshots, defaulting to the first and last observation.
-  const options = (selected) => observations.map((o) => h('option', { value: o.id, selected: o.id === selected }, `${o.id} · ${caption(o)}`));
-  const beforeSelect = h('select', { id: 'cmp-before' }, options(observations[0].id));
-  const afterSelect = h('select', { id: 'cmp-after' }, options(observations.at(-1).id));
-  const pair = h('div', { class: 'grid-2' });
-  const figure = (o, other, role) =>
-    h(
-      'figure',
-      { class: 'shot', 'data-role': role },
-      h('a', { href: shotUrl(runId, o.screenshot), target: '_blank', rel: 'noopener' }, h('img', { src: shotUrl(runId, o.screenshot), alt: `${role} screenshot ${o.id}` })),
-      h(
-        'figcaption',
-        {},
-        h('strong', {}, `${role}: ${o.id}`),
-        ` · ${caption(o)}`,
-        h('dl', {}, o.fields.map((f) => [h('dt', {}, f.label), h('dd', { class: role === 'After' && valueOf(other, f.label) !== f.value ? 'changed' : null }, f.value)])),
-      ),
-    );
-  const renderPair = () => {
-    const b = observations.find((o) => o.id === beforeSelect.value);
-    const a = observations.find((o) => o.id === afterSelect.value);
-    pair.replaceChildren(figure(b, a, 'Before'), figure(a, b, 'After'));
-  };
-  beforeSelect.addEventListener('change', renderPair);
-  afterSelect.addEventListener('change', renderPair);
-  renderPair();
-
   return h(
     'section',
-    { class: 'card' },
-    h('h2', {}, 'Before and after'),
+    { class: 'card', 'data-section': 'evidence' },
+    h('h2', {}, 'Evidence'),
+    h(
+      'p',
+      { class: 'small muted' },
+      pairFromFinding
+        ? 'Showing the observations immediately before and after the problem appears. Use the menus to compare any other steps.'
+        : 'Showing the first and last observations. Use the menus to compare any other steps.',
+    ),
+    h('div', { class: 'compare-controls' }, h('span', {}, h('label', { for: 'cmp-before' }, 'Before'), beforeSelect), h('span', {}, h('label', { for: 'cmp-after' }, 'After'), afterSelect)),
+    pair,
+    h('h3', { class: 'compare-title' }, 'All observed values'),
     h('p', { class: 'small muted' }, 'Values Repro read from the page after each step. These are recorded observations, not model statements.'),
     h('div', { class: 'table-wrap' }, table),
-    h('div', { class: 'legend' }, h('span', {}, h('span', { class: 'swatch' }), 'changed from previous observation'), h('span', {}, 'cited ✓ = the model cited this value and it matched')),
-    observations.length > 1
-      ? [
-          h('h3', { class: 'compare-title' }, 'Compare screenshots'),
-          h('div', { class: 'compare-controls' }, h('span', {}, h('label', { for: 'cmp-before' }, 'Before'), beforeSelect), h('span', {}, h('label', { for: 'cmp-after' }, 'After'), afterSelect)),
-          pair,
-        ]
-      : h('p', { class: 'muted small' }, 'Only one observation was recorded, so there is nothing to compare.'),
+    h('div', { class: 'legend' }, h('span', {}, h('span', { class: 'swatch' }), 'changed from the previous step'), h('span', {}, 'cited ✓ = the model cited this value and it matched')),
   );
 }
 
-function actionsCard(record) {
+function actionsCard(record, labels) {
+  const describe = (a) => {
+    if (a.kind === 'open') return 'Opened the store page';
+    return `Clicked ${a.target?.role ?? ''} “${a.target?.name ?? ''}”`;
+  };
   return h(
     'section',
-    { class: 'card' },
-    h('h2', {}, 'Actions'),
+    { class: 'card', 'data-section': 'steps' },
+    h('h2', {}, 'Steps the investigator took'),
     record.actions.length
       ? h(
           'ol',
@@ -685,18 +751,69 @@ function actionsCard(record) {
             h(
               'li',
               {},
-              h('span', { class: 'mono muted' }, `${a.id} `),
-              a.kind === 'open'
-                ? ['Opened ', h('span', { class: 'mono' }, a.url ?? '')]
-                : [`Clicked ${a.target?.role} “${a.target?.name}” `, h('span', { class: 'muted' }, `(${a.target?.elementId} in `), h('a', { href: `#${a.target?.fromObservation}` }, a.target?.fromObservation), h('span', { class: 'muted' }, ')')],
-              ' → ',
-              a.ok ? h('span', { class: 'status-ok' }, 'ok') : h('span', { class: 'status-bad' }, `failed: ${a.error}`),
-              a.afterObservation ? [', then ', h('a', { href: `#${a.afterObservation}` }, a.afterObservation)] : null,
+              describe(a),
+              a.ok ? '' : h('span', { class: 'status-bad' }, ` — failed: ${a.error}`),
+              a.afterObservation ? [' → ', h('a', { href: `#${a.afterObservation}` }, labels.of(a.afterObservation))] : null,
+              h('span', { class: 'small muted mono' }, `  ${a.id}${a.afterObservation ? ` → ${a.afterObservation}` : ''}`),
               a.settleWarning ? h('div', { class: 'small muted' }, `Page did not fully settle: ${a.settleWarning}`) : null,
             ),
           ),
         )
       : h('p', { class: 'muted' }, 'No browser actions were recorded.'),
+  );
+}
+
+function modelCard(record) {
+  const { expectation } = record;
+  const report = record.modelReport;
+  return h(
+    'details',
+    { class: 'card', 'data-section': 'model' },
+    h('summary', {}, 'What the model assumed and reported'),
+    h('div', { class: 'source-tag' }, expectation.supplied ? 'Expected behavior · supplied by you' : 'Expected behavior · inferred by the model (not stated in the report)'),
+    h('p', { class: expectation.supplied || expectation.testedAgainst ? 'prose' : 'muted' }, expectation.supplied ?? expectation.testedAgainst ?? 'Not recorded: no report was submitted.'),
+    expectation.supplied && expectation.testedAgainst && expectation.testedAgainst !== expectation.supplied
+      ? [h('div', { class: 'source-tag' }, 'Model tested against'), h('p', { class: 'prose' }, expectation.testedAgainst)]
+      : null,
+    h('div', { class: 'source-tag' }, 'Assumptions the model made'),
+    expectation.modelAssumptions.length
+      ? h('ul', { class: 'plain' }, expectation.modelAssumptions.map((a) => h('li', {}, a)))
+      : h('p', { class: 'muted' }, 'None listed.'),
+    report
+      ? [
+          h('div', { class: 'source-tag' }, 'Observed behavior (as stated by the model)'),
+          h('p', { class: 'prose' }, report.observed_behavior),
+          h('div', { class: 'source-tag' }, 'Explanation (as stated by the model)'),
+          h('p', { class: 'prose' }, report.explanation),
+          report.inconclusive_reason ? [h('div', { class: 'source-tag' }, 'Why inconclusive'), h('p', { class: 'prose' }, report.inconclusive_reason)] : null,
+        ]
+      : h('p', { class: 'muted' }, 'No report was submitted.'),
+  );
+}
+
+function citationsCard(record, labels) {
+  const matched = record.evidence.filter((c) => c.ok).length;
+  return h(
+    'details',
+    { class: 'card', 'data-section': 'citations' },
+    h('summary', {}, `Citation checks (${matched}/${record.evidence.length} matched the recorded page)`),
+    record.evidence.length
+      ? h(
+          'ul',
+          { class: 'citations' },
+          record.evidence.map((c) =>
+            h(
+              'li',
+              {},
+              h('span', { class: c.ok ? 'status-ok' : 'status-bad' }, c.ok ? '✓ matches ' : '✗ mismatch '),
+              h('a', { href: `#${c.observation_id}` }, labels.of(c.observation_id)),
+              h('span', { class: 'small muted' }, ` (${c.observation_id}) `),
+              h('span', { class: 'mono' }, `${c.label}: ${c.value}`),
+              c.problem ? h('div', { class: 'small status-bad' }, c.problem) : null,
+            ),
+          ),
+        )
+      : h('p', { class: 'muted' }, 'The model cited no evidence.'),
   );
 }
 
@@ -714,9 +831,9 @@ function detailsCard(record) {
     ['Cleanup', `context closed ${record.cleanup.contextClosed}, browser closed ${record.cleanup.browserClosed}`],
   ];
   return h(
-    'section',
-    { class: 'card' },
-    h('h2', {}, 'Run details'),
+    'details',
+    { class: 'card', 'data-section': 'run-details' },
+    h('summary', {}, 'Model, usage and run details'),
     h('dl', { class: 'details' }, rows.map(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
     record.toolErrors.length ? [h('h3', {}, 'Tool errors'), h('ul', { class: 'plain' }, record.toolErrors.map((e) => h('li', {}, `${e.id} (${e.tool}, ${e.kind}): ${e.message}`)))] : null,
     record.providerCalls.some((c) => !c.ok)

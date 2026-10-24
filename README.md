@@ -60,25 +60,38 @@ set `PLAYWRIGHT_BROWSERS_PATH` for both commands.
 
 ```sh
 npm ci
+npm run browsers            # the Chromium build that the pinned Playwright expects
 cp .env.example .env        # then set REPRO_ANTHROPIC_API_KEY and REPRO_MODEL
-REPRO_STORE_FIXTURE=faulty npm start
+npm start
 ```
 
 `npm start` prints:
 
 ```
-Demo store:  http://127.0.0.1:4173/  (fixture: faulty)
 Repro:       http://127.0.0.1:4300/
+Demo store:  http://127.0.0.1:4173/  Working cart
+Demo store:  http://127.0.0.1:4174/  Total never updates
+Demo store:  http://127.0.0.1:4175/  Total stops updating after the first increase
 ```
 
-Open the Repro URL, pick the example complaint (or type one), and click
-**Investigate**. Stop with Ctrl+C.
+Open the Repro URL, choose a **demo scenario**, pick the example bug report
+(or type one), and click **Investigate**. Stop with Ctrl+C.
 
-- **Fixture selection:** `REPRO_STORE_FIXTURE=correct` or `faulty` (default
-  `faulty`), chosen once at startup and printed only in the terminal. Restart
-  to switch. The UI, the run records and the investigator never receive it.
-- **Ports:** `REPRO_PORT` (default 4300) and `STORE_PORT` (default 4173). Both
-  servers listen on 127.0.0.1 only.
+- **Demo scenarios:** each runs on its own store, so you can switch scenarios
+  between investigations without restarting. The scenario is captured when a
+  run starts and saved in the run's `demo-setup.json`, so later selections
+  never affect an active run and old reports keep their original setup. Before
+  each run the server confirms that the store is serving that scenario by
+  pricing 2 and 3 mugs through the store API, outside the investigator's
+  browser. The investigator only receives the bug report and the store URL. It
+  is never told the scenario and has to discover the behaviour in the browser.
+- **Default selection:** `REPRO_STORE_FIXTURE=correct|faulty|faulty-from-3`
+  sets which scenario is selected first (default `faulty-from-3`). The
+  browser then remembers your last choice.
+- **Ports:** `REPRO_PORT` (default 4300) for Repro, and `STORE_PORT` (default
+  4173) for the first store; the others use the next two ports. All servers
+  listen on 127.0.0.1 only. The "Try this store yourself" links open each
+  store for manual testing.
 - **Output-token cap for one session:** `REPRO_MAX_OUTPUT_TOKENS=2048 npm start`
   overrides the value in `.env`.
 - Without `REPRO_ANTHROPIC_API_KEY` and `REPRO_MODEL`, the UI still loads,
@@ -97,7 +110,7 @@ Open the Repro URL, pick the example complaint (or type one), and click
 | `npm run investigate -- --url <store URL> [--expected "..."] "<complaint>"` | One live investigation. Needs `.env`. |
 | `npm run smoke` | Runs the cart flow (three increases) against every store fixture and checks the labeled observations. Exits nonzero if any check fails. |
 | `npm run typecheck` | Type-checks all TypeScript. |
-| `REPRO_STORE_FIXTURE=correct npm run store` | Serves the demo store at http://127.0.0.1:4173/ (`PORT` to change). Use `faulty` for the buggy version. |
+| `REPRO_STORE_FIXTURE=correct npm run store` | Serves the demo store at http://127.0.0.1:4173/ (`PORT` to change). Use `faulty` or `faulty-from-3` for a buggy version. |
 
 `npm run smoke` clicks "Increase quantity" three times per fixture and checks
 the total after each click. Each smoke run writes to
@@ -260,6 +273,30 @@ UI runs are saved under `runs/ui/<run-id>/` (git-ignored) with the usual
 `run.json`, `transcript.json` and `obs-N.png`, plus:
 
 - `status.json`: `running`, `finished`, `failed` or `interrupted`, with the verdict or error.
+- `demo-setup.json`: the demo scenario chosen for the run, the store URL and
+  the pre-run store check. It is presenter metadata and never reaches the
+  investigator. Runs saved before scenarios existed don't have it, and their
+  reports say the setup was not recorded.
+
+### Reading a report
+
+From top to bottom:
+
+1. **Verdict**, with any downgrade explanation.
+2. **What the browser showed:** one sentence derived from the recorded
+   observations, never from the model's text, e.g. "Quantity changed from 2
+   to 3, but Total stayed at $40.00 instead of reaching $60.00." Expected
+   values are labelled as inferred from the demo pricing assumption.
+3. **Covered in this run:** the tested quantities and clicks.
+4. **Bug report and demo scenario.**
+5. **Evidence:** screenshots side by side. By default they show the steps
+   immediately before and after the problem appears (otherwise the first and
+   last). Menus select any other step, and a table lists all observed values.
+   Steps have readable labels ("After the first increase"), with observation
+   IDs alongside.
+6. **Steps** the investigator took.
+7. Collapsed sections: the model's assumptions and account, citation checks,
+   model and token usage, and the raw activity log.
 - `events.jsonl`: the progress events as they were recorded.
 
 Only one investigation runs at a time; the form is disabled and the API
