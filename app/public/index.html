@@ -10,8 +10,14 @@
   <body>
     <header class="topbar">
       <div class="topbar-inner">
-        <a class="brand" href="/">Repro</a>
-        <span class="tagline">Reproduce a bug report in a real browser</span>
+        <a class="brand" href="/" data-nav aria-label="Repro, home">
+          <svg class="mark" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false">
+            <rect x="2.75" y="2.75" width="12.5" height="12.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.5" />
+            <rect x="8.75" y="8.75" width="12.5" height="12.5" rx="3" fill="currentColor" />
+          </svg>
+          <span class="wordmark">Repro</span>
+        </a>
+        <span class="tagline">Bug reports, reproduced in a real browser</span>
         <span id="server-state" class="pill" hidden></span>
       </div>
     </header>

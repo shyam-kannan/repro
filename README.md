@@ -282,21 +282,33 @@ UI runs are saved under `runs/ui/<run-id>/` (git-ignored) with the usual
 
 From top to bottom:
 
-1. **Verdict**, with any downgrade explanation.
+1. **Verdict** badge (an icon and a word, never colour alone), with any
+   downgrade explanation.
 2. **What the browser showed:** one sentence derived from the recorded
    observations, never from the model's text, e.g. "Quantity changed from 2
    to 3, but Total stayed at $40.00 instead of reaching $60.00." Expected
    values are labelled as inferred from the demo pricing assumption.
-3. **Covered in this run:** the tested quantities and clicks.
+3. **Coverage:** the tested quantities and clicks.
 4. **Bug report and demo scenario.**
-5. **Evidence:** screenshots side by side. By default they show the steps
-   immediately before and after the problem appears (otherwise the first and
-   last). Menus select any other step, and a table lists all observed values.
-   Steps have readable labels ("After the first increase"), with observation
-   IDs alongside.
-6. **Steps** the investigator took.
-7. Collapsed sections: the model's assumptions and account, citation checks,
-   model and token usage, and the raw activity log.
+5. **Before and after:** the two screenshots side by side, opening on the
+   steps immediately before and after the problem (otherwise the first and
+   last). Menus select any other pair, and the caption always describes the
+   pair shown, including reversed or identical selections. "Top of page" zooms
+   the display; "Whole screenshot" shows all of it. The image files are never
+   altered. On the After side, "different from Before" compares with the
+   selected Before step. A value that contradicts the inferred expectation is
+   marked "✕ Expected $60.00 (inferred)".
+6. **All observed values:** every step's values. Here "changed since previous
+   step" compares each column with the one to its left. Each legend appears
+   only where its marking is actually shown.
+7. **Steps** the investigator took.
+8. Collapsed sections: the model's assumptions and account (labelled as
+   unchecked model text), citation checks, model and token usage, and the
+   activity log.
+
+While a run is in progress, the page shows a timeline built only from
+recorded events. Completed steps are marked ✓, the current one "Now", and
+failures ✕. There are no percentages, and no model reasoning is shown.
 - `events.jsonl`: the progress events as they were recorded.
 
 Only one investigation runs at a time; the form is disabled and the API

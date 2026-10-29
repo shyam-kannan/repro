@@ -30,6 +30,13 @@ import {
 } from './helpers.ts';
 
 const COMPLAINT = 'When I increase the quantity in my cart, the total stays the same.';
+// "Before: <step label>" / "After: <step label>" for the two compared screenshots.
+const pairLabels = (page: Page) =>
+  page.locator('figure.shot').evaluateAll((els) => els.map((e) => `${(e as HTMLElement).dataset.role}: ${(e as HTMLElement).dataset.label}`));
+// The finding sentence and its inferred-expectation note, read separately.
+const findingText = (page: Page) => page.locator('.verdict .finding .finding-text').innerText();
+const inferredNote = (page: Page) => page.locator('.verdict .finding .inferred-note').innerText();
+const coverageText = (page: Page) => page.locator('.verdict .coverage .coverage-text').innerText();
 // Screenshots of the UI for manual review; outside the repository.
 const SHOT_DIR = process.env.REPRO_UI_SHOT_DIR;
 
@@ -326,7 +333,7 @@ describe('browser flow (test double)', () => {
     const page = await newPage();
     try {
       await page.goto(`${h.base}/`);
-      await page.getByText('Repro takes a bug report written in plain English').waitFor();
+      await page.getByText('Repro takes a plain-English bug report').waitFor();
       assert.equal(await page.locator('label.scenario').count(), 3);
       assert.equal(await page.getByRole('radio', { name: /^Total never updates/ }).isChecked(), true, 'server default is preselected');
       await page.getByRole('button', { name: COMPLAINT }).click();
@@ -336,9 +343,12 @@ describe('browser flow (test double)', () => {
 
       await page.waitForURL(/\/runs\/run-[0-9a-f]{8}$/);
       // Progress appears while the run is still in progress.
-      await page.getByText('Recorded obs-1:').waitFor();
+      await page.getByText('Recorded the page (obs-1)').waitFor();
       assert.equal(await page.locator('.verdict.running').count(), 1);
-      await page.getByText(/Model chose to click button “Increase quantity”/).waitFor();
+      // While the model is asked for its next step, that row is the current one.
+      await page.locator('ol.timeline li[data-state="current"]', { hasText: 'Waiting for the model' }).first().waitFor();
+      await page.getByText(/^Clicked button “Increase quantity”$/).waitFor();
+      assert.equal(await page.locator('ol.timeline li[data-state="current"]').count() <= 1, true, 'at most one current step');
       await shoot(page, '2-progress');
 
       const verdict = page.locator('.verdict[data-verdict]');
@@ -348,17 +358,17 @@ describe('browser flow (test double)', () => {
       await page.getByText('This run used a scripted test double, not a real model').waitFor();
 
       // Summary at the top: verdict, the finding from recorded evidence, coverage.
+      assert.equal(await findingText(page), 'Quantity changed from 1 to 2, but Total stayed at $20.00 instead of reaching $40.00.');
       assert.equal(
-        await page.locator('.verdict .finding').innerText(),
-        'What the browser showed: Quantity changed from 1 to 2, but Total stayed at $20.00 instead of reaching $40.00.\n' +
-          '$40.00 is inferred, not stated in the report: Unit price $20.00 × Quantity 2, assuming one item and no discounts, tax or shipping.',
+        await inferredNote(page),
+        '$40.00 is inferred, not stated in the report: Unit price $20.00 × Quantity 2, assuming one item and no discounts, tax or shipping.',
       );
-      assert.match(await page.locator('.verdict .coverage').innerText(), /Tested quantities: 1, 2\. Clicked button “Increase quantity” once\./);
+      assert.equal(await coverageText(page), 'Tested quantities: 1, 2. Clicked button “Increase quantity” once.');
       const order = await page.evaluate(() =>
         [...document.querySelectorAll('#app > section, #app > details')].map((el) => (el as HTMLElement).dataset.section ?? el.className),
       );
       assert.deepEqual(order, ['verdict reproduced', 'report', 'evidence', 'steps', 'model', 'citations', 'run-details', 'activity']);
-      assert.match(await page.locator('[data-section="report"] .demo-setup').innerText(), /^Demo scenario: Total never updates/);
+      assert.equal(await page.locator('[data-section="report"] .demo-setup .scenario-name').innerText(), 'Total never updates');
 
       // Secondary material is collapsed until opened.
       for (const section of ['model', 'citations', 'run-details', 'activity']) {
@@ -372,10 +382,7 @@ describe('browser flow (test double)', () => {
       // Readable step labels, with observation IDs kept alongside.
       const headers = await page.locator('table.obs thead th').allInnerTexts();
       assert.deepEqual(headers.map((t) => t.split('\n')), [['Value'], ['Page opened', 'obs-1'], ['After the first increase', 'obs-2']]);
-      assert.deepEqual(
-        await page.locator('figure.shot .shot-title').allInnerTexts(),
-        ['Before: Page opened', 'After: After the first increase'],
-      );
+      assert.deepEqual(await pairLabels(page), ['Before: Page opened', 'After: After the first increase']);
       const totalRow = await page.locator('table.obs tbody tr', { hasText: 'Total' }).locator('td').allInnerTexts();
       assert.deepEqual(totalRow.map((t) => t.split(/\s*cited/)[0].trim()), ['$20.00', '$20.00']);
       assert.equal(await page.locator('table.obs tbody tr', { hasText: 'Quantity' }).locator('td.changed').count(), 1);
@@ -394,7 +401,7 @@ describe('browser flow (test double)', () => {
       const url = page.url();
       await page.reload();
       await page.locator('.verdict[data-verdict="reproduced"]').waitFor();
-      await page.getByText(/Activity log \(12 recorded events\)/).waitFor();
+      assert.equal(await page.locator('details[data-section="activity"] .summary-meta').innerText(), '12 recorded events');
       const reopened = await newPage();
       await reopened.goto(url);
       await reopened.locator('.verdict[data-verdict="reproduced"]').waitFor();
@@ -471,7 +478,7 @@ describe('browser flow (test double)', () => {
     try {
       const { runId } = await (await post(h.base, { complaint: COMPLAINT })).json();
       await page.goto(`${h.base}/runs/${runId}`);
-      await page.getByText('Recorded obs-1:').waitFor();
+      await page.getByText('Recorded the page (obs-1)').waitFor();
       h.repro.interruptActive('Test: server stopped.');
       h.repro.server.close();
       h.repro.server.closeAllConnections();
@@ -510,22 +517,18 @@ describe('coverage and downgrade display (test double)', () => {
       assert.match(text, /Model proposed: Not reproduced in this run → final verdict: Inconclusive/);
       assert.match(text, /Contradicted by its own evidence \(demo cart pricing rule/);
       assert.match(text, /obs-3 shows Quantity 3 and Unit price \$20\.00, so Total should be \$60\.00, but it shows Total \$40\.00/);
-      assert.match(text, /Covered in this run: Tested quantities: 1, 2, 3\. Clicked button “Increase quantity” twice\./);
-      assert.match(
-        await page.locator('.verdict .finding').innerText(),
-        /^What the browser showed: Quantity changed from 2 to 3, but Total stayed at \$40\.00 instead of reaching \$60\.00\.\n\$60\.00 is inferred, not stated in the report/,
-      );
+      assert.equal(await coverageText(page), 'Tested quantities: 1, 2, 3. Clicked button “Increase quantity” twice.');
+      assert.equal(await findingText(page), 'Quantity changed from 2 to 3, but Total stayed at $40.00 instead of reaching $60.00.');
+      assert.match(await inferredNote(page), /^\$60\.00 is inferred, not stated in the report/);
       // The comparison opens on the steps just before and after the problem.
       assert.equal(await page.locator('#cmp-before').inputValue(), 'obs-2');
       assert.equal(await page.locator('#cmp-after').inputValue(), 'obs-3');
-      assert.deepEqual(await page.locator('figure.shot .shot-title').allInnerTexts(), [
-        'Before: After the first increase',
-        'After: After the second increase',
-      ]);
-      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed').allInnerTexts(), ['3\nchanged']);
+      assert.deepEqual(await pairLabels(page), ['Before: After the first increase', 'After: After the second increase']);
+      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed .tag').allInnerTexts(), ['different from Before']);
+      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed .value').allInnerTexts(), ['3']);
       // Other steps stay selectable.
       await page.locator('#cmp-before').selectOption('obs-1');
-      assert.deepEqual(await page.locator('figure.shot .shot-title').allInnerTexts(), ['Before: Page opened', 'After: After the second increase']);
+      assert.deepEqual(await pairLabels(page), ['Before: Page opened', 'After: After the second increase']);
       await page.reload();
       await page.locator('.verdict[data-verdict="inconclusive"] .proposed').waitFor();
     } finally {
@@ -538,9 +541,8 @@ describe('coverage and downgrade display (test double)', () => {
     try {
       assert.equal(await verdict.getAttribute('data-verdict'), 'not_reproduced');
       assert.equal(await page.locator('.verdict .proposed').count(), 0, 'no downgrade, so no proposed/final line');
-      const coverage = await page.locator('.verdict .coverage').innerText();
-      assert.match(coverage, /^Covered in this run: Tested quantities: 1, 2\. Clicked button “Increase quantity” once\./);
-      assert.match(coverage, /applies only to the states listed/);
+      assert.equal(await coverageText(page), 'Tested quantities: 1, 2. Clicked button “Increase quantity” once.');
+      assert.match(await page.locator('.verdict .coverage .coverage-note').innerText(), /applies only to the states listed/);
 
       // A record saved before coverage existed: the server derives it on read
       // and leaves the file untouched.
@@ -552,7 +554,7 @@ describe('coverage and downgrade display (test double)', () => {
       await writeFile(file, legacyText);
       await page.reload();
       await page.locator('.verdict .coverage').waitFor();
-      assert.match(await page.locator('.verdict .coverage').innerText(), /Tested quantities: 1, 2\. Clicked button “Increase quantity” once\./);
+      assert.equal(await coverageText(page), 'Tested quantities: 1, 2. Clicked button “Increase quantity” once.');
       assert.equal(await readFile(file, 'utf8'), legacyText, 'the saved record is not rewritten');
     } finally {
       await close();
@@ -657,10 +659,7 @@ describe('demo scenarios', () => {
       await page.locator('.verdict[data-verdict]').waitFor({ timeout: 20_000 });
       assert.equal(await page.locator('.verdict').getAttribute('data-verdict'), 'not_reproduced');
       assert.equal(await page.locator('.demo-setup').getAttribute('data-scenario'), 'working-cart');
-      assert.match(
-        await page.locator('.verdict .finding').innerText(),
-        /^What the browser showed: Every observed total matched unit price × quantity: Quantity 1 → 2, Total \$20\.00 → \$40\.00\./,
-      );
+      assert.equal(await findingText(page), 'Every observed total matched unit price × quantity: Quantity 1 → 2, Total $20.00 → $40.00.');
       const runUrl = page.url();
 
       // The choice is remembered for the next run, without affecting this report.
@@ -681,8 +680,8 @@ describe('demo scenarios', () => {
       await writeFile(join(dir, 'status.json'), JSON.stringify(status));
       await page.reload();
       await page.locator('.verdict[data-verdict="not_reproduced"]').waitFor();
-      assert.match(await page.locator('.demo-setup').innerText(), /Demo scenario: not recorded/);
-      assert.match(await page.locator('.verdict .finding').innerText(), /Every observed total matched/);
+      assert.match(await page.locator('.demo-setup .scenario-name').innerText(), /^Not recorded/);
+      assert.match(await findingText(page), /Every observed total matched/);
     } finally {
       await page.close();
       await h.close();
@@ -743,7 +742,7 @@ describe('evidence display: changes versus contradicted expectations (test doubl
       assert.deepEqual(await flagged(page, 'table.obs'), []);
       assert.deepEqual(await flagged(page, 'figure.shot'), []);
       // Ordinary changes carry a text label, not only a colour.
-      assert.deepEqual(await page.locator('table.obs td.changed .tag').allInnerTexts(), ['changed', 'changed', 'changed', 'changed']);
+      assert.deepEqual(await page.locator('table.obs td.changed .tag').allInnerTexts(), Array(4).fill('changed since previous step'));
 
       await page.locator('#cmp-before').selectOption('obs-2');
       assert.equal(
@@ -766,7 +765,7 @@ describe('evidence display: changes versus contradicted expectations (test doubl
           'inferred $60.00 (Unit price $20.00 × Quantity 3).',
       );
       // Table: only obs-3's Total is flagged; Quantity 3 is an ordinary change.
-      assert.deepEqual(await flagged(page, 'table.obs'), ['not the expected $60.00 (inferred)']);
+      assert.deepEqual(await flagged(page, 'table.obs'), ['✕ Expected $60.00 (inferred)']);
       const totalRow = page.locator('table.obs tbody tr', { hasText: 'Total' }).locator('td');
       assert.equal(await totalRow.nth(2).getAttribute('class'), 'contradicts');
       assert.equal(await totalRow.nth(1).getAttribute('class'), 'changed', '$20 → $40 is an ordinary change');
@@ -774,10 +773,10 @@ describe('evidence display: changes versus contradicted expectations (test doubl
       assert.equal(await quantityRow.nth(2).getAttribute('class'), 'changed');
 
       // Comparison details: the After total is flagged with the same text.
-      assert.deepEqual(await flagged(page, 'figure.shot[data-role="After"]'), ['not the expected $60.00 (inferred)']);
+      assert.deepEqual(await flagged(page, 'figure.shot[data-role="After"]'), ['✕ Expected $60.00 (inferred)']);
       assert.match(await page.locator('figure.shot[data-role="After"] dd.contradicts').innerText(), /^\$40\.00\n/);
       assert.match(await totalRow.nth(2).innerText(), /^\$40\.00/);
-      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed').allInnerTexts(), ['3\nchanged']);
+      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed .tag').allInnerTexts(), ['different from Before']);
       assert.deepEqual(await flagged(page, 'figure.shot[data-role="Before"]'), []);
 
       // Changing steps keeps the caption and flags accurate.
@@ -831,6 +830,123 @@ describe('evidence display: changes versus contradicted expectations (test doubl
       );
     } finally {
       await unrelated.close();
+    }
+  });
+
+  test('legends appear only where a flagged value is shown, and follow the selected pair', async () => {
+    const working = await runInUi(twoClickNotReproducedDouble(), /^Working cart/, '12-working-legends');
+    try {
+      assert.equal(await working.page.locator('[data-section="evidence"] .legend .flag').count(), 0, 'nothing flagged, so no flag legend');
+      assert.equal(await working.page.locator('.pair-legend').isHidden(), true);
+      assert.equal(await working.page.locator('.table-legend .tag').innerText(), 'changed since previous step');
+    } finally {
+      await working.close();
+    }
+
+    const faulty = await runInUi(twoClickReproducedDouble(), /^Total stops updating/, '13-faulty-legends');
+    const { page } = faulty;
+    try {
+      // Default pair includes the flagged obs-3: the comparison legend explains it.
+      assert.equal(await page.locator('.pair-legend').isVisible(), true);
+      assert.match(await page.locator('.pair-legend').innerText(), /does not match Total = Unit price × Quantity/);
+      assert.equal(await page.locator('.table-legend .flag').count(), 1, 'the table contains a flagged value');
+      // A pair without the flagged step hides the comparison legend; the table keeps its own.
+      await page.locator('#cmp-after').selectOption('obs-2');
+      await page.locator('#cmp-before').selectOption('obs-1');
+      assert.equal(await page.locator('.pair-legend').isHidden(), true);
+      assert.equal(await page.locator('.table-legend .flag').count(), 1);
+    } finally {
+      await faulty.close();
+    }
+
+    const outOfScope = await runInUi(twoClickNotReproducedDouble(), /^Total stops updating/, '14-out-of-scope-legends', 'Searching for headphones returns no results.');
+    try {
+      assert.equal(await outOfScope.page.locator('[data-section="evidence"] .legend .flag').count(), 0);
+      assert.equal(await outOfScope.page.locator('.pair-legend').isHidden(), true);
+    } finally {
+      await outOfScope.close();
+    }
+  });
+
+  test('change wording: previous step in the table, the selected Before step in the comparison', async () => {
+    const { page, close } = await runInUi(twoClickNotReproducedDouble(), /^Working cart/, '15-change-wording');
+    const afterTags = () =>
+      page.locator('figure.shot[data-role="After"] dd').evaluateAll((dds) =>
+        dds.map((dd) => `${dd.previousElementSibling?.textContent}: ${dd.querySelector('.value')?.textContent}${dd.querySelector('.tag') ? ` (${dd.querySelector('.tag')!.textContent})` : ''}`),
+      );
+    try {
+      // Table: every change is relative to the column on its left.
+      assert.deepEqual(await page.locator('table.obs td.changed .tag').allInnerTexts(), Array(4).fill('changed since previous step'));
+      assert.equal(await page.locator('[data-section="evidence"] figure .tag', { hasText: 'previous step' }).count(), 0);
+
+      // Nonadjacent (default first → last): relative to Before, not to the previous step.
+      assert.deepEqual(await afterTags(), ['Unit price: $20.00', 'Quantity: 3 (different from Before)', 'Total: $60.00 (different from Before)']);
+
+      // Adjacent.
+      await page.locator('#cmp-before').selectOption('obs-2');
+      assert.deepEqual(await afterTags(), ['Unit price: $20.00', 'Quantity: 3 (different from Before)', 'Total: $60.00 (different from Before)']);
+
+      // Reversed: Before is later than After; the caption says so and tags stay relative to Before.
+      await page.locator('#cmp-before').selectOption('obs-3');
+      await page.locator('#cmp-after').selectOption('obs-1');
+      assert.match(await page.locator('.compare-caption').innerText(), /^Comparing “After the second increase” \(obs-3\) with “Page opened” \(obs-1\)\. Before is a later step than After\./);
+      assert.deepEqual(await afterTags(), ['Unit price: $20.00', 'Quantity: 1 (different from Before)', 'Total: $20.00 (different from Before)']);
+
+      // Identical: nothing is marked as different.
+      await page.locator('#cmp-after').selectOption('obs-3');
+      assert.match(await page.locator('.compare-caption').innerText(), /^Both sides show “After the second increase” \(obs-3\)\./);
+      assert.equal(await page.locator('[data-section="evidence"] figure .tag').count(), 0);
+      // Unit price never changes, so it is never tagged.
+      assert.equal(await page.locator('table.obs tbody tr', { hasText: 'Unit price' }).locator('.tag').count(), 0);
+    } finally {
+      await close();
+    }
+  });
+
+  test('keyboard: scenario cards, the screenshot view toggle and comparison menus', async () => {
+    const h = await startRepro(twoClickNotReproducedDouble());
+    const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await page.goto(`${h.base}/`);
+      await page.locator('label.scenario').first().waitFor();
+      // Tab from the brand link reaches the checked radio; arrows move the selection.
+      await page.locator('a.brand').focus();
+      await page.keyboard.press('Tab');
+      assert.equal(await page.evaluate(() => (document.activeElement as HTMLInputElement).value), 'total-never-updates');
+      await page.keyboard.press('ArrowLeft');
+      assert.equal(await page.getByRole('radio', { name: /^Working cart/ }).isChecked(), true);
+      assert.deepEqual(
+        await page.locator('label.scenario .scenario-state:not([hidden])').evaluateAll((els) => els.map((e) => e.closest('label')!.querySelector('.scenario-label')!.textContent)),
+        ['Working cart'],
+        'the "Selected" label follows the selection',
+      );
+      // Focus is visible on the selected card.
+      const outline = await page.locator('label.scenario', { hasText: 'Working cart' }).evaluate((el) => getComputedStyle(el).outlineStyle);
+      assert.equal(outline, 'solid');
+
+      await page.getByRole('button', { name: COMPLAINT }).click();
+      await page.getByRole('button', { name: 'Investigate' }).click();
+      await page.locator('.verdict[data-verdict]').waitFor({ timeout: 20_000 });
+
+      // The view toggle is a pair of pressed-state buttons; the screenshot file is unchanged.
+      const src = await page.locator('figure.shot[data-role="After"] img').getAttribute('src');
+      assert.equal(await page.locator('.pair').getAttribute('class'), 'pair zoomed');
+      await page.getByRole('button', { name: 'Whole screenshot' }).focus();
+      await page.keyboard.press('Enter');
+      assert.equal(await page.locator('.pair').getAttribute('class'), 'pair');
+      assert.equal(await page.getByRole('button', { name: 'Whole screenshot' }).getAttribute('aria-pressed'), 'true');
+      assert.equal(await page.getByRole('button', { name: 'Top of page' }).getAttribute('aria-pressed'), 'false');
+      assert.equal(await page.locator('figure.shot[data-role="After"] img').getAttribute('src'), src);
+
+      // The menus work from the keyboard and update the caption.
+      await page.locator('#cmp-before').focus();
+      await page.keyboard.press('ArrowDown');
+      assert.equal(await page.locator('#cmp-before').inputValue(), 'obs-2');
+      assert.match(await page.locator('.compare-caption').innerText(), /^Comparing “After the first increase” \(obs-2\)/);
+    } finally {
+      await context.close();
+      await h.close();
     }
   });
 });
