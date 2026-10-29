@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Repro</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="/" data-nav aria-label="Repro, home">
+          <svg class="mark" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false">
+            <rect x="2.75" y="2.75" width="12.5" height="12.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.5" />
+            <rect x="8.75" y="8.75" width="12.5" height="12.5" rx="3" fill="currentColor" />
+          </svg>
+          <span class="wordmark">Repro</span>
+        </a>
+        <span class="tagline">Bug reports, reproduced in a real browser</span>
+        <span id="server-state" class="pill" hidden></span>
+      </div>
+    </header>
+    <main id="app" class="page" aria-live="polite">
+      <p class="muted">Loading…</p>
+    </main>
+    <noscript><p class="page">Repro's interface needs JavaScript.</p></noscript>
+  </body>
+</html>

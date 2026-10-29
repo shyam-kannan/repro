@@ -1,0 +1,28 @@
+{
+  "name": "repro",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env scripts/start.ts",
+    "browsers": "playwright install chromium",
+    "store": "node demo-store/start.ts",
+    "smoke": "node scripts/smoke.ts",
+    "typecheck": "tsc",
+    "investigate": "node --env-file-if-exists=.env scripts/investigate.ts",
+    "trials": "node --env-file-if-exists=.env scripts/live-trials.ts",
+    "test": "node --test --test-concurrency=1 'test/**/*.test.ts'",
+    "eval": "node --env-file-if-exists=.env scripts/eval.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.2.0",
+    "playwright": "1.63.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2"
+  }
+}
