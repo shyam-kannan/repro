@@ -506,7 +506,7 @@ function addActivity(list, runId, startIso, event) {
 }
 
 function renderFinished(runId, data) {
-  const { status: runStatus, record, events, setup, finding } = data;
+  const { status: runStatus, record, events, setup, finding, pricingCheck } = data;
   const activity = h('ol', { class: 'activity' });
   for (const event of events) addActivity(activity, runId, runStatus.startedAt, event);
   const log = h('details', { class: 'card log', 'data-section': 'activity' }, h('summary', {}, `Activity log (${events.length} recorded events)`), activity);
@@ -537,7 +537,7 @@ function renderFinished(runId, data) {
       : null,
     summaryPanel(record, runStatus, finding),
     runHeader(runId, runStatus, setup),
-    comparisonCard(runId, record, finding, labels),
+    comparisonCard(runId, record, finding, pricingCheck, labels),
     actionsCard(record, labels),
     modelCard(record),
     citationsCard(record, labels),
@@ -630,7 +630,7 @@ function summaryPanel(record, runStatus, finding) {
   );
 }
 
-function comparisonCard(runId, record, finding, labels) {
+function comparisonCard(runId, record, finding, pricing, labels) {
   const observations = record.observations;
   if (!observations.length) {
     return h('section', { class: 'card' }, h('h2', {}, 'Evidence'), h('p', { class: 'muted' }, 'No observations were recorded.'));
@@ -638,6 +638,18 @@ function comparisonCard(runId, record, finding, labels) {
   const fieldLabels = [...new Set(observations.flatMap((o) => o.fields.map((f) => f.label)))];
   const valueOf = (o, label) => o.fields.find((f) => f.label === label)?.value;
   const citation = (o, label) => record.evidence.find((c) => c.observation_id === o.id && c.label === label);
+  // A Total that the scoped pricing check found inconsistent with Unit price ×
+  // Quantity. Nothing is marked when the check does not apply.
+  const contradiction = (o, label) =>
+    label === 'Total' && pricing?.applies ? pricing.contradictions.find((c) => c.observation === o.id) : undefined;
+  // How a value is shown: contradicting the inferred expectation, an ordinary
+  // change from the compared value, or plain. Both markings carry text, not only colour.
+  const marked = (o, label, value, compared, hasCompared) => {
+    const wrong = contradiction(o, label);
+    if (wrong) return { cls: 'contradicts', extra: h('span', { class: 'flag' }, `not the expected ${wrong.expectedTotal} (inferred)`) };
+    if (hasCompared && value !== compared) return { cls: 'changed', extra: h('span', { class: 'tag' }, 'changed') };
+    return { cls: null, extra: null };
+  };
 
   // Default pair: the observations just before and after the problem the
   // evidence shows; otherwise the first and last observation.
@@ -650,6 +662,33 @@ function comparisonCard(runId, record, finding, labels) {
   const beforeSelect = h('select', { id: 'cmp-before' }, options(defaultBefore));
   const afterSelect = h('select', { id: 'cmp-after' }, options(defaultAfter));
   const pair = h('div', { class: 'grid-2' });
+  const caption = h('p', { class: 'compare-caption', 'aria-live': 'polite' });
+  // Describes the pair actually selected, so it stays true when the menus change.
+  const describePair = (b, a) => {
+    const parts = [
+      b.id === a.id
+        ? `Both sides show “${labels.of(a.id)}” (${a.id}).`
+        : `Comparing “${labels.of(b.id)}” (${b.id}) with “${labels.of(a.id)}” (${a.id}).`,
+    ];
+    if (observations.length === 1) return [...parts, 'Only one observation was recorded.'].join(' ');
+    if (finding?.kind === 'total_not_updated' && b.id === finding.before && a.id === finding.after && b.id !== a.id) {
+      parts.push('These are the steps immediately before and after the total first stopped matching the inferred expectation.');
+    }
+    if (!pricing?.applies) {
+      parts.push(`No pricing expectation was checked for this run${pricing?.why ? `: ${pricing.why}` : ''}.`);
+      return parts.join(' ');
+    }
+    const shown = b.id === a.id ? [a] : [b, a];
+    const wrong = shown.map((o) => contradiction(o, 'Total')).filter(Boolean);
+    if (wrong.length) {
+      for (const w of wrong) {
+        parts.push(`In ${w.observation}, Total ${w.total} does not match the inferred ${w.expectedTotal} (Unit price ${w.unitPrice} × Quantity ${w.quantity}).`);
+      }
+    } else {
+      parts.push(`${shown.length === 1 ? 'Its total matches' : 'Both totals match'} the inferred expectation (Total = Unit price × Quantity).`);
+    }
+    return parts.join(' ');
+  };
   const figure = (o, other, role) =>
     h(
       'figure',
@@ -659,7 +698,11 @@ function comparisonCard(runId, record, finding, labels) {
       h(
         'dl',
         {},
-        o.fields.map((f) => [h('dt', {}, f.label), h('dd', { class: role === 'After' && valueOf(other, f.label) !== f.value ? 'changed' : null }, f.value)]),
+        o.fields.map((f) => {
+          // Changes are marked on the After side, relative to Before.
+          const m = marked(o, f.label, f.value, valueOf(other, f.label), role === 'After' && other.id !== o.id);
+          return [h('dt', {}, f.label), h('dd', { class: m.cls }, f.value, m.extra)];
+        }),
       ),
       h(
         'div',
@@ -672,6 +715,7 @@ function comparisonCard(runId, record, finding, labels) {
     const b = observations.find((o) => o.id === beforeSelect.value);
     const a = observations.find((o) => o.id === afterSelect.value);
     pair.replaceChildren(figure(b, a, 'Before'), figure(a, b, 'After'));
+    caption.textContent = describePair(b, a);
   };
   beforeSelect.addEventListener('change', renderPair);
   afterSelect.addEventListener('change', renderPair);
@@ -702,11 +746,13 @@ function comparisonCard(runId, record, finding, labels) {
             const value = valueOf(o, label);
             const previous = i > 0 ? valueOf(observations[i - 1], label) : undefined;
             const cited = citation(o, label);
+            const m = marked(o, label, value, previous, i > 0);
             return h(
               'td',
-              { class: i > 0 && value !== previous ? 'changed' : null },
+              { class: m.cls },
               value ?? h('span', { class: 'muted' }, '—'),
               cited ? h('span', { class: cited.ok ? 'cited' : 'cited bad' }, cited.ok ? 'cited ✓' : 'cited ✗') : null,
+              m.extra,
             );
           }),
         ),
@@ -718,19 +764,22 @@ function comparisonCard(runId, record, finding, labels) {
     'section',
     { class: 'card', 'data-section': 'evidence' },
     h('h2', {}, 'Evidence'),
-    h(
-      'p',
-      { class: 'small muted' },
-      pairFromFinding
-        ? 'Showing the observations immediately before and after the problem appears. Use the menus to compare any other steps.'
-        : 'Showing the first and last observations. Use the menus to compare any other steps.',
-    ),
+    caption,
+    h('p', { class: 'small muted' }, 'Use the menus to compare any other steps. Screenshots are shown exactly as recorded.'),
     h('div', { class: 'compare-controls' }, h('span', {}, h('label', { for: 'cmp-before' }, 'Before'), beforeSelect), h('span', {}, h('label', { for: 'cmp-after' }, 'After'), afterSelect)),
     pair,
     h('h3', { class: 'compare-title' }, 'All observed values'),
     h('p', { class: 'small muted' }, 'Values Repro read from the page after each step. These are recorded observations, not model statements.'),
     h('div', { class: 'table-wrap' }, table),
-    h('div', { class: 'legend' }, h('span', {}, h('span', { class: 'swatch' }), 'changed from the previous step'), h('span', {}, 'cited ✓ = the model cited this value and it matched')),
+    h(
+      'div',
+      { class: 'legend' },
+      h('span', {}, h('span', { class: 'swatch' }), '“changed” = different from the previous step'),
+      pricing?.applies
+        ? h('span', {}, h('span', { class: 'swatch bad' }), '“not the expected …” = does not match the inferred Total = Unit price × Quantity (one item, no discounts, tax or shipping)')
+        : null,
+      h('span', {}, 'cited ✓ = the model cited this value and it matched'),
+    ),
   );
 }
 
@@ -770,6 +819,7 @@ function modelCard(record) {
     'details',
     { class: 'card', 'data-section': 'model' },
     h('summary', {}, 'What the model assumed and reported'),
+    h('p', { class: 'small muted attribution' }, 'The model’s own words, shown as written. Repro has not checked them, and they are not findings.'),
     h('div', { class: 'source-tag' }, expectation.supplied ? 'Expected behavior · supplied by you' : 'Expected behavior · inferred by the model (not stated in the report)'),
     h('p', { class: expectation.supplied || expectation.testedAgainst ? 'prose' : 'muted' }, expectation.supplied ?? expectation.testedAgainst ?? 'Not recorded: no report was submitted.'),
     expectation.supplied && expectation.testedAgainst && expectation.testedAgainst !== expectation.supplied

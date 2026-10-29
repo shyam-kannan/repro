@@ -15,6 +15,12 @@ import { SCENARIOS, type Scenario } from '../app/scenarios.ts';
 import type { ModelProvider } from '../src/provider.ts';
 import {
   cartInvestigatorDouble,
+  elementNamed,
+  latestObservation,
+  reply,
+  toolUse,
+  valueOf,
+  type ModelObservation,
   twoClickNotReproducedDouble,
   scriptedProvider,
   startStore,
@@ -516,7 +522,7 @@ describe('coverage and downgrade display (test double)', () => {
         'Before: After the first increase',
         'After: After the second increase',
       ]);
-      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed').allInnerTexts(), ['3']);
+      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed').allInnerTexts(), ['3\nchanged']);
       // Other steps stay selectable.
       await page.locator('#cmp-before').selectOption('obs-1');
       assert.deepEqual(await page.locator('figure.shot .shot-title').allInnerTexts(), ['Before: Page opened', 'After: After the second increase']);
@@ -680,6 +686,151 @@ describe('demo scenarios', () => {
     } finally {
       await page.close();
       await h.close();
+    }
+  });
+});
+
+describe('evidence display: changes versus contradicted expectations (test double)', () => {
+  // Clicks twice, then reports Reproduced with an assumption worded the way a
+  // live run worded it ("intermittent"). Model text must stay attributed.
+  function twoClickReproducedDouble() {
+    const seen: ModelObservation[] = [];
+    return scriptedProvider(({ request }) => {
+      const observation = latestObservation(request);
+      seen.push(observation);
+      if (seen.length <= 2) return reply([toolUse('click_element', { element_id: elementNamed(observation, 'Increase quantity') })]);
+      const cite = (o: ModelObservation, label: string) => ({ observation_id: o.observation_id, label, value: valueOf(o, label) });
+      return reply([
+        toolUse('finish_investigation', {
+          verdict: 'reproduced',
+          expected_behavior: 'The total equals unit price times quantity after each increase.',
+          assumptions: ['The bug appears intermittent: the first increase worked and the second did not.'],
+          observed_behavior: 'The second increase left the total unchanged.',
+          evidence: [cite(seen[1], 'Quantity'), cite(seen[1], 'Total'), cite(seen[2], 'Quantity'), cite(seen[2], 'Total')],
+          explanation: 'Quantity rose from 2 to 3 but the total stayed the same.',
+        }),
+      ]);
+    });
+  }
+
+  async function runInUi(provider: ModelProvider, scenarioLabel: RegExp, shot: string, complaint = COMPLAINT) {
+    const h = await startRepro(provider);
+    const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+    const page = await context.newPage();
+    page.on('pageerror', (error) => assert.fail(`page error: ${error.message}`));
+    await page.goto(`${h.base}/`);
+    await page.getByRole('radio', { name: scenarioLabel }).check();
+    await page.getByLabel('Bug report').fill(complaint);
+    await page.getByRole('button', { name: 'Investigate' }).click();
+    await page.locator('.verdict[data-verdict]').waitFor({ timeout: 20_000 });
+    if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, `${shot}.png`), fullPage: true });
+    return { page, close: async () => { await context.close(); await h.close(); } };
+  }
+  const caption = (page: Page) => page.locator('[data-section="evidence"] .compare-caption').innerText();
+  // The text label on each value marked as contradicting the inferred expectation.
+  const flagged = (page: Page, scope: string) => page.locator(`${scope} .contradicts .flag`).allInnerTexts();
+
+  test('working cart: the caption describes the comparison and nothing is flagged as wrong', async () => {
+    const { page, close } = await runInUi(twoClickNotReproducedDouble(), /^Working cart/, '8-working-cart');
+    try {
+      assert.equal(await page.locator('.verdict').getAttribute('data-verdict'), 'not_reproduced');
+      const text = await caption(page);
+      assert.doesNotMatch(text, /problem/i);
+      assert.equal(
+        text,
+        'Comparing “Page opened” (obs-1) with “After the second increase” (obs-3). Both totals match the inferred expectation (Total = Unit price × Quantity).',
+      );
+      assert.deepEqual(await flagged(page, 'table.obs'), []);
+      assert.deepEqual(await flagged(page, 'figure.shot'), []);
+      // Ordinary changes carry a text label, not only a colour.
+      assert.deepEqual(await page.locator('table.obs td.changed .tag').allInnerTexts(), ['changed', 'changed', 'changed', 'changed']);
+
+      await page.locator('#cmp-before').selectOption('obs-2');
+      assert.equal(
+        await caption(page),
+        'Comparing “After the first increase” (obs-2) with “After the second increase” (obs-3). Both totals match the inferred expectation (Total = Unit price × Quantity).',
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  test('total stops updating: the $40.00 total is marked against the inferred $60.00; model wording stays attributed', async () => {
+    const { page, close } = await runInUi(twoClickReproducedDouble(), /^Total stops updating/, '9-faulty-from-3');
+    try {
+      assert.equal(await page.locator('.verdict').getAttribute('data-verdict'), 'reproduced');
+      assert.equal(
+        await caption(page),
+        'Comparing “After the first increase” (obs-2) with “After the second increase” (obs-3). These are the steps immediately ' +
+          'before and after the total first stopped matching the inferred expectation. In obs-3, Total $40.00 does not match the ' +
+          'inferred $60.00 (Unit price $20.00 × Quantity 3).',
+      );
+      // Table: only obs-3's Total is flagged; Quantity 3 is an ordinary change.
+      assert.deepEqual(await flagged(page, 'table.obs'), ['not the expected $60.00 (inferred)']);
+      const totalRow = page.locator('table.obs tbody tr', { hasText: 'Total' }).locator('td');
+      assert.equal(await totalRow.nth(2).getAttribute('class'), 'contradicts');
+      assert.equal(await totalRow.nth(1).getAttribute('class'), 'changed', '$20 → $40 is an ordinary change');
+      const quantityRow = page.locator('table.obs tbody tr', { hasText: 'Quantity' }).locator('td');
+      assert.equal(await quantityRow.nth(2).getAttribute('class'), 'changed');
+
+      // Comparison details: the After total is flagged with the same text.
+      assert.deepEqual(await flagged(page, 'figure.shot[data-role="After"]'), ['not the expected $60.00 (inferred)']);
+      assert.match(await page.locator('figure.shot[data-role="After"] dd.contradicts').innerText(), /^\$40\.00\n/);
+      assert.match(await totalRow.nth(2).innerText(), /^\$40\.00/);
+      assert.deepEqual(await page.locator('figure.shot[data-role="After"] dd.changed').allInnerTexts(), ['3\nchanged']);
+      assert.deepEqual(await flagged(page, 'figure.shot[data-role="Before"]'), []);
+
+      // Changing steps keeps the caption and flags accurate.
+      await page.locator('#cmp-after').selectOption('obs-2');
+      await page.locator('#cmp-before').selectOption('obs-1');
+      assert.equal(
+        await caption(page),
+        'Comparing “Page opened” (obs-1) with “After the first increase” (obs-2). Both totals match the inferred expectation (Total = Unit price × Quantity).',
+      );
+      assert.deepEqual(await flagged(page, 'figure.shot'), []);
+      await page.locator('#cmp-before').selectOption('obs-3');
+      await page.locator('#cmp-after').selectOption('obs-3');
+      assert.match(await caption(page), /^Both sides show “After the second increase” \(obs-3\)\. In obs-3, Total \$40\.00 does not match the inferred \$60\.00/);
+
+      // The model's word "intermittent" appears only in the attributed model section.
+      const outside = await page.evaluate(() =>
+        [...document.querySelectorAll('#app > *')]
+          .filter((el) => (el as HTMLElement).dataset.section !== 'model')
+          .map((el) => (el as HTMLElement).innerText)
+          .join('\n'),
+      );
+      assert.doesNotMatch(outside, /intermittent/i);
+      await page.locator('details[data-section="model"] > summary').click();
+      const model = await page.locator('details[data-section="model"]').innerText();
+      assert.match(model, /The model’s own words, shown as written\. Repro has not checked them, and they are not findings\./);
+      assert.match(model, /Assumptions the model made\n.*The bug appears intermittent: the first increase worked and the second did not\./is);
+      if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, '9b-faulty-from-3-model-open.png'), fullPage: true });
+    } finally {
+      await close();
+    }
+  });
+
+  test('inconclusive: a failed model call and an out-of-scope complaint flag nothing', async () => {
+    const failed = await runInUi(authFailure(), /^Total stops updating/, '10-inconclusive-api');
+    try {
+      assert.equal(await failed.page.locator('.verdict').getAttribute('data-verdict'), 'inconclusive');
+      assert.equal(await caption(failed.page), 'Both sides show “Page opened” (obs-1). Only one observation was recorded.');
+      assert.deepEqual(await flagged(failed.page, '[data-section="evidence"]'), []);
+    } finally {
+      await failed.close();
+    }
+
+    // Totals are wrong at quantity 3, but the complaint is not about totals,
+    // so the pricing expectation does not apply and nothing is marked.
+    const unrelated = await runInUi(twoClickNotReproducedDouble(), /^Total stops updating/, '11-out-of-scope', 'Searching for headphones returns no results.');
+    try {
+      assert.deepEqual(await flagged(unrelated.page, '[data-section="evidence"]'), []);
+      assert.equal(
+        await caption(unrelated.page),
+        'Comparing “Page opened” (obs-1) with “After the second increase” (obs-3). No pricing expectation was checked for this run: the complaint is not about the cart total and quantity.',
+      );
+    } finally {
+      await unrelated.close();
     }
   });
 });

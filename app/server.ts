@@ -19,6 +19,7 @@ import { investigate, type InvestigationEvent, type RunRecord } from '../src/inv
 import type { ModelProvider } from '../src/provider.ts';
 import { describeCoverage } from '../src/coverage.ts';
 import { deriveFinding } from '../src/finding.ts';
+import { checkCartPricing } from '../src/cart-pricing-rule.ts';
 import { identifyStore } from '../demo-store/identify.ts';
 import type { Scenario } from './scenarios.ts';
 import type { Browser } from 'playwright';
@@ -333,6 +334,9 @@ export async function createReproServer(options: ReproServerOptions): Promise<Re
       record: record ? publicRecord(record) : null,
       // Derived from the saved observations each time the report is read.
       finding: record ? deriveFinding(record.input.complaint, record.observations) : null,
+      // The demo-scoped pricing check over every observation, so the report can
+      // mark values that contradict the inferred expectation.
+      pricingCheck: record ? checkCartPricing(record.input.complaint, record.observations) : null,
     });
   };
 

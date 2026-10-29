@@ -327,3 +327,16 @@ details.card[open] > summary { margin-bottom: 0.7rem; }
 
 /* Show the top of each screenshot larger; the link opens the full image. */
 figure.shot img { aspect-ratio: 2 / 1; object-fit: cover; object-position: top; }
+
+/* Value markings. Each carries a text label; colour is only a second cue. */
+.tag, .flag { display: block; font-size: 0.72rem; font-weight: 700; }
+.tag { color: var(--muted); }
+.flag { color: var(--repro-fg); }
+table.obs td.contradicts, figure.shot dd.contradicts {
+  background: var(--repro-bg);
+  outline: 1px solid var(--repro-border);
+}
+figure.shot dd.contradicts { padding: 0 0.25rem; border-radius: 3px; justify-self: start; }
+.swatch.bad { background: var(--repro-bg); border-color: var(--repro-border); }
+.compare-caption { margin: 0 0 0.2rem; }
+.attribution { margin: 0 0 0.6rem; }
